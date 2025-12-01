@@ -65,3 +65,83 @@ def load_hive_data(spark):
     #Ensure correct schema and types
     df = df.withColumn("ts", F.to_timestamp("ts"))
     return df
+#----- Feature Engineering -----
+
+def expand_token(df, token_col="token", token_size=CONFIG["TOKEN_SIZE"]):
+    """
+    Expand array<double> token into individual numeric columns token_0..token_{n-1}.
+    If token is shorter than token_size, missing entries become null.
+    """
+    for i in range(token_size):
+        df = df.withColumn(f"token_{i}", F.col(token_col).getItem(i).cast("double"))
+    return df
+
+
+def build_time_feature(df, ts_col="ts"):
+    """
+    Add epoch, hour of day, day of week, month, is_weekend columns
+    Can adjust accordingly to features needed.
+    Feature nedeed because Spark cannot understand timestamp type directly.
+    """
+    df = df.withColumn("Epoch", F.col(ts_col).cast("long"))
+    df = df.withColumn("HourOfDay", F.hour(ts_col))
+    df = df.withColumn("DayOfWeek", F.date_format(ts_col, "u").cast("int")) # 1 -> 7 (Mon -> Sun)
+    df = df.withColumn("Month", F.month(ts_col))
+    df = df.withColumn("is_weekend", (F.col("DayOfWeek").isin([6,7])).cast("int"))
+    return df
+
+
+def add_lag_and_rolling_features(df, zone_col="zone", epoch_col="ts_epoch", price_col="price", lags=[1,2], roll_windows=[24]):
+    """
+    Add lag and rolling window features based on CONFIG settings.
+    Add lag features (lag_{h}) and rolling mean features (roll_{window}h)
+    Expects hourly data; lags/roll windows provided in hours.
+    """
+
+    w_zone = Window.partitionBy(zone_col).orderBy(epoch_col)
+    for h in lags:
+        df = df.withColumn(f"price_lag_{h}", F.lag(price_col, h).over(w_zone))
+    
+    # Rolling mean using rangeBetwqeen in seconds
+    for w in roll_windows:
+        seconds = w * 3600
+        w_roll = Window.partitionBy(zone_col).orderBy(epoch_col).rangeBetween(-seconds, 0)
+        df = df.withColumn(f"price_roll_mean_{w}h", F.avg(price_col).over(w_roll)) # Rolling mean
+        df = df.withColumn(f"price_roll_std_{w}h", F.stddev(price_col).over(w_roll)) # Rolling standard deviation
+    
+    return df
+
+def prepare_features(df):
+    """
+    Complete feature engineering pipelin on the Dataframe recieved
+    """
+    df = expand_token(df, token_size=CONFIG["TOKEN_SIZE"])
+
+    df = build_time_feature(df, "ts")
+
+    df = add_lag_and_rolling_features(df,
+                                      lags=CONFIG["LAGS"],
+                                      roll_windows=CONFIG["ROLL_WINDOWS_HOURS"])
+    
+    # Create feature column list (dropping identifiers)
+    # Numeric features from example: demand, lags, rollings, time-of-day, weather tokens
+
+    feature_cols = ["Demand", "HourOfDay", "DayOfWeek", "Month", "is_weekend"]
+
+    # adding lags
+    for h in CONFIG["LAGS"]:
+        feature_cols.append(f"price_lag_{h}")
+
+    # add rolling stats
+    for w in CONFIG["ROLL_WINDOWS_HOURS"]:
+        feature_cols.append(f"price_roll_mean_{w}h")
+        feature_cols.append(f"price_roll_std_{w}h")
+
+    # add Token columns
+    for i in range(CONFIG["TOKEN_SIZE"]):
+        feature_cols.append(f"token_{i}")
+    
+    # Drop rows with null target
+    df = df.filter(F.col("price").isNotNull())  
+    
+    return df, feature_cols
