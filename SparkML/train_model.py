@@ -1,9 +1,10 @@
 import os
 import json
 import datetime
+import random
 from typing import List
 
-from pyspark.sql import SparkSession, functions as F, types as T
+from pyspark.sql import SparkSession, functions as F, types as T, Row
 from pyspark.sql.window import Window
 from pyspark.ml import Pipeline, PipelineModel
 from pyspark.ml.feature import VectorAssembler, Imputer, StandardScaler
@@ -18,7 +19,7 @@ CONFIG = {
     "MODEL_OUTPUT_PATH" : "/models/spark_model/",
     "MODEL_NAME" : "spark_model",
 
-    "TOKEN_SIZE" : 8, # Change to match token size
+    "TOKEN_SIZE" : 8, 
     
     "TRAIN_FRAC" : 0.7,
     "VALID_FRAC" : 0.15,
@@ -28,17 +29,17 @@ CONFIG = {
     "LAGS": [1, 2, 24],        # lag in hours
     "ROLL_WINDOWS_HOURS": [3, 24, 168],  # rolling windows in hours (3hr, 24hr, 7d)
 
-    # Model hyperparams (search space)
-    "RF": {"numTrees": [50, 100], "maxDepth": [6, 10]},
-    "GBT": {"maxIter": [50, 100], "maxDepth": [4, 8]},
+    # Model hyperparams (search space) -- Reduced for faster mock testing
+    "RF": {"numTrees": [10, 20], "maxDepth": [5]}, # Set numTrees to [50, 100] and maxDepth to [6,10] for real runs 
+    "GBT": {"maxIter": [10], "maxDepth": [4]}, # Set maxIter to [50, 100] and maxDepth to [4,8] for real runs
 
     "SPARK_MASTER" : "local[*]",
     "APP_NAME" : "SparkApp",
 
-    # Zone to score for demo
     "SAMPLE_ZONE": None,
-
 }
+
+
 
 def now_tag():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -57,16 +58,66 @@ def create_spark_session():
     print("Spark Session created")
     return spark
 
+# ---- Mock Data ----
+def create_mock_data(spark, num_rows=1000):
+    """
+    Generates a DataFrame with columns: ts, zone, price, token
+    to mimic the expected input for testing.
+    """
+    print(f"--- Generating {num_rows} rows of mock data ---")
+    
+    data = []
+    base_time = datetime.datetime.now() - datetime.timedelta(days=60)
+    zones = ["ZoneA", "ZoneB"]
+    
+    for i in range(num_rows):
+        # Create a linear time sequence with some randomness
+        row_time = base_time + datetime.timedelta(hours=i % (num_rows//2))
+        
+        # Random data
+        zone = zones[i % 2]
+        price = 50.0 + (i % 24) + random.uniform(-5, 5) # Periodic price pattern
+        
+        # Token array (mocking weather/embedding data)
+        token = [random.random() for _ in range(CONFIG["TOKEN_SIZE"])]
+        
+        data.append(Row(
+            ts=row_time,
+            zone=zone,
+            price=float(price),
+            token=token 
+        ))
+        
+    schema = T.StructType([
+        T.StructField("ts", T.TimestampType(), True),
+        T.StructField("zone", T.StringType(), True),
+        T.StructField("price", T.DoubleType(), True),
+        T.StructField("token", T.ArrayType(T.DoubleType()), True)
+    ])
+    
+    df = spark.createDataFrame(data, schema)
+    return df
+
 # ---- Load Data -----
 
-def load_hive_data(spark):
-    db = CONFIG["HIVE_DB"]
-    table = CONFIG["HIVE_TABLE"]
-    sql = f"SELECT * FROM {db}.{table}" # Edit * to select specific columns if needed
-    df = spark.sql(sql)
-    
-    #Ensure correct schema and types
-    df = df.withColumn("ts", F.to_timestamp("ts"))
+def load_hive_data(spark, use_mock=False):
+
+    if use_mock:
+        df = create_mock_data(spark, num_rows=2000)
+        
+        # Register as Temp View so SQL queries in score_live_weather work
+        # We handle the "database.table" naming by registering it strictly as the table name
+        # and adjusting the query logic slightly or relying on Spark resolving it.
+        df.createOrReplaceTempView(CONFIG["HIVE_TABLE"])
+        return df
+    else:
+        db = CONFIG["HIVE_DB"]
+        table = CONFIG["HIVE_TABLE"]
+        sql = f"SELECT * FROM {db}.{table}" # Edit * to select specific columns if needed
+        df = spark.sql(sql)
+
+        #Ensure correct schema and types
+        df = df.withColumn("ts", F.to_timestamp("ts"))
     return df
 
 #----- Feature Engineering -----
@@ -148,6 +199,9 @@ def prepare_features(df):
     # Drop rows with null target
     df = df.filter(F.col("price").isNotNull())  
     
+    if "Demand" not in df.columns:
+        if "Demand" in feature_cols: feature_cols.remove("Demand")
+    
     return df, feature_cols
 
 #----- Train/Validate/Test by time split -----
@@ -188,7 +242,6 @@ def build_pipeline(feature_cols: List[str], label_col="price", model_type="RF"):
     return pipeline, estimator
 
 # ---- Hyperparameter Tuning -----
-# Needs time-awareness
 
 def time_aware_train_val(pipeline, estimator, train_df, val_df, parm_grid, evaluator, parallelism=2):
     """
@@ -236,13 +289,14 @@ def save_model_and_metadata(model_pipeline, metadata: dict, base_dir: str, mode_
     return model_path
 
 # ----- Scoring -----
-def score_live_weather(spark, model_path: str, live_weather_token: List[float], zone: str):
+def score_live_weather(spark, model_path: str, live_weather_token: List[float], zone: str, use_mock=False):
     """
     Score a live weather token by building required features:
     - fetch most recent row(s) for the zone to compute lags/rolling stats
     - build a single-row DataFrame with assembled features
     - load model and predict
     """
+    pass
     model = PipelineModel.load(model_path)
 
     table = f"{CONFIG["HIVE_DB"]}.{CONFIG["HIVE_TABLE"]}"
@@ -295,16 +349,95 @@ def score_live_weather(spark, model_path: str, live_weather_token: List[float], 
     prediction = model.transform(feature_df)
     return prediction.select("prediction").toPandas()
 
+def score_live_with_object(spark, model_pipeline, live_weather_token: List[float], zone: str, use_mock=False):
+    """
+    Modified scoring function that takes the model OBJECT instead of path, 
+    so we can test immediately without reloading from disk.
+    """
+    table_name = CONFIG["HIVE_TABLE"]
+
+    # If using mock, the view is just 'sample_table', no DB prefix
+    query_table = table_name if use_mock else f"{CONFIG['HIVE_DB']}.{table_name}"
+
+    print(f"Querying recent history from: {query_table} for zone {zone}")
+    
+    if zone:
+        recent = spark.sql(f"SELECT * FROM {query_table} WHERE zone = '{zone}' ORDER BY ts DESC LIMIT 200")
+    else:
+        recent = spark.sql(f"SELECT * FROM {query_table} ORDER BY ts DESC LIMIT 200")
+
+    if dict(recent.dtypes)["ts"] == 'string':
+        recent = recent.withColumn("ts", F.to_timestamp("ts"))
+
+     # Ensure there is data
+    if recent.count() == 0:
+        print("No recent data found for scoring context.")
+        return None
+
+    recent = expand_token(recent, token_size=CONFIG["TOKEN_SIZE"])
+    recent = build_time_feature(recent, "ts")
+    recent = add_lag_and_rolling_features(recent,
+                                          epoch_col="Epoch",
+                                          lags=CONFIG["LAGS"],
+                                          roll_windows=CONFIG["ROLL_WINDOWS_HOURS"])
+    
+    # Get the latest row as baseline for lags
+    baseline = recent.orderBy(F.col("Epoch").desc()).limit(1).toPandas().to_dict(orient="records")[0]
+    
+    feature_data = {}
+    feature_data["Demand"] = float(baseline.get("Demand") or 0.0)
+
+    now_ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    dt = datetime.datetime.fromtimestamp(now_ts, datetime.timezone.utc)
+    feature_data["HourOfDay"] = dt.hour
+    feature_data["DayOfWeek"] = int(dt.isoweekday())
+    feature_data["Month"] = dt.month
+    feature_data["is_weekend"] = 1 if feature_data["DayOfWeek"] in [6,7] else 0
+
+    for h in CONFIG["LAGS"]:
+        val = baseline.get(f"price_lag_{h}")
+        if val is None: val = baseline.get("price") # fallback
+        feature_data[f"price_lag_{h}"] = float(val or 0.0)
+    
+    for w in CONFIG["ROLL_WINDOWS_HOURS"]:
+        feature_data[f"price_roll_mean_{w}h"] = float(baseline.get(f"price_roll_mean_{w}h") or baseline.get("price") or 0.0)
+        feature_data[f"price_roll_std_{w}h"] = float(baseline.get(f"price_roll_std_{w}h") or 0.0)
+        
+    # Token features (Live Input)
+    token = list(live_weather_token or [])
+    # Pad if short
+    if len(token) < CONFIG["TOKEN_SIZE"]:
+        token = token + [0.0] * (CONFIG["TOKEN_SIZE"] - len(token))
+        
+    for i in range(CONFIG["TOKEN_SIZE"]):
+        feature_data[f"token_{i}"] = float(token[i])
+
+    feature_df = spark.createDataFrame([feature_data])
+    
+    # Fill any missing columns (like Demand if not in feature_data) with 0
+    # The VectorAssembler needs all input columns to exist.
+    # We check what the model expects (metadata from training usually)
+    # Here we just try/catch the transform
+    try:
+        prediction = model_pipeline.transform(feature_df)
+        return prediction.select("prediction").toPandas()
+    except Exception as e:
+        print(f"Scoring failed: {e}")
+        return None
+
 # ----- MAIN!!!!! -----
 
 def main(): 
+    
+    USE_MOCK_DATA = True  # Set to False to use Hive data
+
     spark = create_spark_session()
     
     try:
-        df = load_hive_data(spark)
+        df = load_hive_data(spark, use_mock=USE_MOCK_DATA)
         print("Loaded rows:", df.count())
         df_features, feature_cols = prepare_features(df)
-        print("Prepared features. Example columns:", feature_cols[:10])
+        print("Prepared features. Example columns:", feature_cols[:5])
 
         train, val, test, p1, p2 = time_based_split(df_features)
         print(f"Split epochs: split1={p1}, split2={p2}")
@@ -364,7 +497,6 @@ def main():
 
         # Demo scoring
         sample_zone = CONFIG["SAMPLE_ZONE"]
-
         if sample_zone is None:
             sample_zone = df.select("zone").orderBy(F.col("ts").desc()).limit(1).collect()[0]["zone"]
 
@@ -372,7 +504,7 @@ def main():
 
         latest_row = spark.sql(f"SELECT * FROM {CONFIG["HIVE_DB"]}.{CONFIG["HIVE_TABLE"]} WHERE zone = '{sample_zone}' ORDER BY ts DESC LIMIT 1").collect()
         if latest_row:
-            live_token = latest_row[0]["weather_token"]
+            live_token = latest_row[0]["token"]
             pred_df = score_live_weather(spark, model_path, live_token, zone=sample_zone)
             print("Live weather token prediction:\n", pred_df)
         else:
