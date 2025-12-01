@@ -33,7 +33,10 @@ CONFIG = {
     "GBT": {"maxIter": [50, 100], "maxDepth": [4, 8]},
 
     "SPARK_MASTER" : "local[*]",
-    "APP_NAME" : "SparkApp"
+    "APP_NAME" : "SparkApp",
+
+    # Zone to score for demo
+    "SAMPLE_ZONE": None,
 
 }
 
@@ -357,5 +360,26 @@ def main():
             "config": CONFIG
         }
 
+        model_path = save_model_and_metadata(best_model, metadata, CONFIG["MODEL_OUTPUT_PATH"], CONFIG["MODEL_NAME"])
+
+        # Demo scoring
+        sample_zone = CONFIG["SAMPLE_ZONE"]
+
+        if sample_zone is None:
+            sample_zone = df.select("zone").orderBy(F.col("ts").desc()).limit(1).collect()[0]["zone"]
+
+        print("Demo scoring for zone:", sample_zone)
+
+        latest_row = spark.sql(f"SELECT * FROM {CONFIG["HIVE_DB"]}.{CONFIG["HIVE_TABLE"]} WHERE zone = '{sample_zone}' ORDER BY ts DESC LIMIT 1").collect()
+        if latest_row:
+            live_token = latest_row[0]["weather_token"]
+            pred_df = score_live_weather(spark, model_path, live_token, zone=sample_zone)
+            print("Live weather token prediction:\n", pred_df)
+        else:
+            print("No data found for demo scoring.")
+
     finally:
         spark.stop()
+
+if __name__ == "__main__":
+    main()
