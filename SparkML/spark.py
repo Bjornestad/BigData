@@ -145,3 +145,40 @@ def prepare_features(df):
     df = df.filter(F.col("price").isNotNull())  
     
     return df, feature_cols
+
+#----- Train/Validate/Test by time split -----
+def time_based_split(df, epoch_col="ts_epoch"):
+    """
+    Split DataFrame into train/validation/test using percentiles on epoch time.
+    Ensures temporal split (no leakage)
+    """
+    fractions = [CONFIG["TRAIN_FRAC"], CONFIG["VALID_FRAC"], CONFIG["TEST_FRAC"]]
+    assert sum(fractions) == 1.0, "Train/Valid/Test fractions must sum to 1.0"
+    
+    # compute split epochs: 70th and 85th percentiles for example (train up to p1, val p1 -> p2, test > p2)
+    p1 = df.select(F.expr(f"percentile_approx({epoch_col}, {CONFIG["TRAIN_FRAC"]})").alias("p1")).collect()[0]["p1"]
+    p2 = df.select(F.expr(f"percentile_approx({epoch_col}, {CONFIG["TRAIN_FRAC"] + CONFIG["VALID_FRAC"]})").alias("p2")).collect()[0]["p2"]
+
+    train = df.filter(F.col(epoch_col) <= p1)
+    val = df.filter((F.col(epoch_col) > p1) & (F.col(epoch_col) <= p2))
+    test = df.filter(F.col(epoch_col) > p2)
+    
+    return train, val, test, p1, p2
+
+#----- Spark Pipeline ------
+def build_pipeline(feature_cols: List[str], label_col="price", model_type="RF"):
+    """Return a Pipeline instance with Imputer, Assembler, Scaler, and estimator placeholder"""
+
+    imputer = Imputer(inputCols=feature_cols, outputCols=feature_cols)
+    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features_raw", handleInvalid="keep")
+    scaler = StandardScaler(inputCol="features_raw", outputCol="features", withMean=True, withStd=True)
+
+    if model_type == "RF":
+        estimator = RandomForestRegressor(featuresCol="features", labelCol=label_col, predictionCol="prediction")
+    elif model_type == "GBT":
+        estimator = GBTRegressor(featuresCol="features", labelCol=label_col, predictionCol="prediction")
+    else:
+        raise ValueError("Unsupported model type. Choose 'RF' or 'GBT'.")
+    
+    pipeline = Pipeline(stages=[imputer, assembler, scaler, estimator])
+    return pipeline, estimator
