@@ -65,6 +65,7 @@ def load_hive_data(spark):
     #Ensure correct schema and types
     df = df.withColumn("ts", F.to_timestamp("ts"))
     return df
+
 #----- Feature Engineering -----
 
 def expand_token(df, token_col="token", token_size=CONFIG["TOKEN_SIZE"]):
@@ -182,6 +183,7 @@ def build_pipeline(feature_cols: List[str], label_col="price", model_type="RF"):
     
     pipeline = Pipeline(stages=[imputer, assembler, scaler, estimator])
     return pipeline, estimator
+
 # ---- Hyperparameter Tuning -----
 # Needs time-awareness
 
@@ -229,3 +231,131 @@ def save_model_and_metadata(model_pipeline, metadata: dict, base_dir: str, mode_
         json.dump(metadata, f, indent=2)
     print(f"Model saved to {model_path}")
     return model_path
+
+# ----- Scoring -----
+def score_live_weather(spark, model_path: str, live_weather_token: List[float], zone: str):
+    """
+    Score a live weather token by building required features:
+    - fetch most recent row(s) for the zone to compute lags/rolling stats
+    - build a single-row DataFrame with assembled features
+    - load model and predict
+    """
+    model = PipelineModel.load(model_path)
+
+    table = f"{CONFIG["HIVE_DB"]}.{CONFIG["HIVE_TABLE"]}"
+    if zone:
+        recent = spark.sql(f"SELECT * FROM {table} WHERE zone = '{zone}' ORDER BY ts DESC LIMIT 200")
+    else:
+        recent = spark.sql(f"SELECT * FROM {table} ORDER BY ts DESC LIMIT 200")
+
+    recent = recent.withColumn("ts", F.to_timestamp("ts"))
+    recent = recent.withColumn("ts_epoch", F.col("ts").cast("long"))
+
+    if recent.count() == 0:
+        raise ValueError("No recent rows found for scoring.")
+    
+    recent = expand_token(recent, token_size=CONFIG["TOKEN_SIZE"])
+    recent = build_time_feature(recent, "ts")
+    recent = add_lag_and_rolling_features(recent,
+                                          lags=CONFIG["LAGS"],
+                                          roll_windows=CONFIG["ROLL_WINDOWS_HOURS"])
+    
+    baseline = recent.orderBy(F.col("ts_epoch").desc()).limit(1).toPandas().to_dict(orient="records")[0]
+    #Feature dictionary
+    feature_data = {}
+    
+    feature_data["Demand"] = float(baseline.get("Demand") or 0.0)
+
+    now_ts =int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+    dt = datetime.datetime.fromtimestamp(now_ts, datetime.timezone.utc)
+    feature_data["HourOfDay"] = dt.hour
+    feature_data["DayOfWeek"] = int(dt.isoweekday())
+    feature_data["Month"] = dt.month
+    feature_data["is_weekend"] = 1 if feature_data["DayOfWeek"] in [6,7] else 0
+
+    #Lags: Use baseline values or fallback to price
+    for h in CONFIG["LAGS"]:
+        feature_data[f"price_lag_{h}"] = float(baseline.get(f"price_lag_{h}") or baseline.get("price") or 0.0)
+    
+    for w in CONFIG["ROLL_WINDOWS_HOURS"]:
+        feature_data[f"price_roll_mean_{w}h"] = float(baseline.get(f"price_roll_mean_{w}h") or baseline.get("price") or 0.0)
+        feature_data[f"price_roll_std_{w}h"] = float(baseline.get(f"price_roll_std_{w}h") or 0.0)
+        
+    # Token features
+    token = list(live_weather_token or [])
+    token = token + [None] * (CONFIG["TOKEN_SIZE"][:CONFIG["TOKEN_SIZE"]])  # Pad if needed
+    for i, v in enumerate(token):
+        feature_data[f"w_token_{i}"] = float(v) if v is not None else None
+
+    feature_df = spark.createDataFrame([feature_data])
+
+    prediction = model.transform(feature_df)
+    return prediction.select("prediction").toPandas()
+
+# ----- MAIN!!!!! -----
+
+def main(): 
+    spark = create_spark_session()
+    
+    try:
+        df = load_hive_data(spark)
+        print("Loaded rows:", df.count())
+        df_features, feature_cols = prepare_features(df)
+        print("Prepared features. Example columns:", feature_cols[:10])
+
+        train, val, test, p1, p2 = time_based_split(df_features)
+        print(f"Split epochs: split1={p1}, split2={p2}")
+        print("Counts -> train:", train.count(), "val:", val.count(), "test:", test.count())
+
+        evaluator = RegressionEvaluator(labelCol="price", predictionCol="prediction", metricName="rmse")
+
+
+        # Random Forest Pipeline 
+        rf_pipeline, rf_estimator = build_pipeline(feature_cols, model_type="RF")
+        rf_param_grid = ParamGridBuilder() \
+            .addGrid(rf_estimator.numTrees, CONFIG["RF"]["numTrees"]) \
+            .addGrid(rf_estimator.maxDepth, CONFIG["RF"]["maxDepth"]) \
+            .build()
+        
+        rf_tvs_model = time_aware_train_val(rf_pipeline, rf_estimator, train, val, rf_param_grid, evaluator, parallelism=2)
+        rf_metrics = evaluate_model(rf_tvs_model.bestModel, test, evaluator)
+
+        print("Random Forest Test Metrics:", rf_metrics)
+
+        # GBT Pipeline
+        gbt_pipeline, gbt_estimator = build_pipeline(feature_cols, model_type="GBT")
+        gbt_param_grid = ParamGridBuilder() \
+            .addGrid(gbt_estimator.maxIter, CONFIG["GBT"]["maxIter"]) \
+            .addGrid(gbt_estimator.maxDepth, CONFIG["GBT"]["maxDepth"]) \
+            .build()
+        
+        gbt_tvs_model = time_aware_train_val(gbt_pipeline, gbt_estimator, train, val, gbt_param_grid, evaluator, parallelism=2)
+        gbt_metrics = evaluate_model(gbt_tvs_model.bestModel, test, evaluator)
+        print("GBT Test Metrics:", gbt_metrics)
+
+        # Pick best model by RMSE
+        best_model = None
+        best_metrics = None
+        best_type = None
+
+        if rf_metrics["RMSE"] <= gbt_metrics["RMSE"]:
+            best_model = rf_tvs_model.bestModel
+            best_metrics = rf_metrics
+            best_type = "RF"
+        else:
+            best_model = gbt_tvs_model.bestModel
+            best_metrics = gbt_metrics
+            best_type = "GBT"
+
+        print(f"Best Selceted model type: {best_type} with RMSE={best_metrics['RMSE']:.4f}")
+
+        # Save model and metadata
+        metadata = {
+            "created_at": now_tag(),
+            "model_type": best_type,
+            "test_metrics": best_metrics,
+            "config": CONFIG
+        }
+
+    finally:
+        spark.stop()
