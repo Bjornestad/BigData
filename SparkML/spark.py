@@ -36,3 +36,32 @@ CONFIG = {
     "APP_NAME" : "SparkApp"
 
 }
+
+def now_tag():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def create_spark_session():
+    spark = ( SparkSession.builder \
+    .appName(CONFIG["APP_NAME"]) \
+    .master(CONFIG["SPARK_MASTER"]) \
+    .config("spark.sql.shuffle.partitions", 8) \
+    .enableHiveSupport() \
+    .getOrCreate()
+    )
+
+    spark.sparkContext.setLogLevel("WARN")
+    print("Spark Session created")
+    return spark
+
+# ---- Load Data -----
+
+def load_hive_data(spark):
+    db = CONFIG["HIVE_DB"]
+    table = CONFIG["HIVE_TABLE"]
+    sql = f"SELECT * FROM {db}.{table}" # Edit * to select specific columns if needed
+    df = spark.sql(sql)
+    
+    #Ensure correct schema and types
+    df = df.withColumn("ts", F.to_timestamp("ts"))
+    return df
