@@ -182,3 +182,50 @@ def build_pipeline(feature_cols: List[str], label_col="price", model_type="RF"):
     
     pipeline = Pipeline(stages=[imputer, assembler, scaler, estimator])
     return pipeline, estimator
+# ---- Hyperparameter Tuning -----
+# Needs time-awareness
+
+def time_aware_train_val(pipeline, estimator, train_df, val_df, parm_grid, evaluator, parallelism=2):
+    """
+    Perform time-aware train-validation split using provided 
+    train and validation DataFrames.
+    """
+    
+    union = train_df.unionByName(val_df)
+    train_size = train_df.count()
+    total = union.count()
+    train_ratio = float(train_size) / float(total) if total > 0 else 0.8
+
+    tvs = TrainValidationSplit(estimator=pipeline,
+                                estimatorParamMaps=parm_grid,
+                                evaluator=evaluator,
+                                trainRatio=train_ratio,
+                                parallelism=parallelism)
+    print(f"Starting Train-Validation Split with train ratio: {train_ratio:.4f}")
+
+    tvs_model = tvs.fit(union)
+    return tvs_model
+
+# --- Evaluation -----
+def evaluate_model(model_pipeline, df, evaluator):
+    predictions = model_pipeline.transform(df)
+    rmse = evaluator.evaluate(predictions)
+    mae = RegressionEvaluator(labelCol="price", predictionCol="prediction", metricName="mae").evaluate(predictions)
+    r2 = RegressionEvaluator(labelCol="price", predictionCol="prediction", metricName="r2").evaluate(predictions)
+
+    return {"RMSE": rmse, "MAE": mae, "R2": r2}
+
+# ---- Save model and the Metadata -----
+
+def save_model_and_metadata(model_pipeline, metadata: dict, base_dir: str, mode_name: str):
+    tag = now_tag()
+    model_path = os.path.join(base_dir, f"{mode_name}_{tag}")
+    metadata_path = os.path.join(model_path, "metadata.json")
+
+    model_pipeline.write().overwrite().save(model_path)
+
+    os.makedirs(model_path, exist_ok=True)
+    with open(metadata_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Model saved to {model_path}")
+    return model_path
