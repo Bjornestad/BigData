@@ -2,6 +2,7 @@ import os
 import json
 import datetime
 import random
+import sys
 from typing import List
 
 from pyspark.sql import SparkSession, functions as F, types as T, Row
@@ -16,7 +17,7 @@ CONFIG = {
     "HIVE_DB" : "default",
     "HIVE_TABLE" : "sample_table",
 
-    "MODEL_OUTPUT_PATH" : "/models/spark_model/",
+    "MODEL_OUTPUT_PATH" : "./SparkML/models", 
     "MODEL_NAME" : "spark_model",
 
     "TOKEN_SIZE" : 8, 
@@ -46,18 +47,82 @@ def now_tag():
 
 
 def create_spark_session():
+
+    # Stop any existing Spark session first to clear any cached Connect settings
+    try:
+        from pyspark.sql import SparkSession as SS
+        existing_spark = SS.getActiveSession()
+        if existing_spark is not None:
+            print("Stopping existing Spark session...")
+            existing_spark.stop()
+    except:
+        pass
+
+    # Force disable Spark Connect by unsetting the environment variable
+    # and ensuring we use the traditional JVM-based Spark
+    # Remove both the variable and any empty string values
+    # Empty strings are treated as valid Connect URLs by PySpark, so we must delete them
+    if "SPARK_REMOTE" in os.environ:
+        del os.environ["SPARK_REMOTE"]
+        print("Removed SPARK_REMOTE environment variable")
+    
+    if "SPARK_CONNECT_MODE_ENABLED" in os.environ:
+        del os.environ["SPARK_CONNECT_MODE_ENABLED"]
+        print("Removed SPARK_CONNECT_MODE_ENABLED environment variable")
+    
+    # Check PySpark version - newer versions default to Connect
+    try:
+        import pyspark
+        pyspark_version = pyspark.__version__
+        print(f"PySpark version: {pyspark_version}")
+    except:
+        pass
+    
+    # Create session with explicit configs to avoid Connect
+    # IMPORTANT: Set Spark Connect disable configs BEFORE setting master
+    # to prevent PySpark from detecting Connect URLs
     spark = ( SparkSession.builder \
     .appName(CONFIG["APP_NAME"]) \
-    .master(CONFIG["SPARK_MASTER"]) \
+    .config("spark.sql.connect.enabled", "false") \
+    .config("spark.sql.connect.server.enabled", "false") \
     .config("spark.sql.shuffle.partitions", 8) \
+    .master(CONFIG["SPARK_MASTER"]) \
     .getOrCreate()
     )
     """
     .enableHiveSupport() \
     """
 
+    # Check if we're in Connect mode (Connect sessions don't have sparkContext)
+    if not hasattr(spark, 'sparkContext'):
+        print("ERROR: Spark Connect mode detected. Attempting to fix...")
+        # Try to stop and recreate
+        try:
+            spark.stop()
+        except:
+            pass
+        
+        # Force create a new session without Connect
+        spark = SparkSession.builder \
+            .appName(CONFIG["APP_NAME"]) \
+            .master(CONFIG["SPARK_MASTER"]) \
+            .config("spark.sql.shuffle.partitions", 8) \
+            .getOrCreate()
+        
+        # Check again
+        if not hasattr(spark, 'sparkContext'):
+            raise RuntimeError(
+                "\n" + "="*60 + "\n"
+                "ERROR: PySpark is using Spark Connect mode, which doesn't support MLlib.\n"
+                "To fix this, run in WSL:\n"
+                "  pip3 uninstall pyspark\n"
+                "  pip3 install 'pyspark==3.5.0'\n"
+                "Or set: export SPARK_CONNECT_MODE_ENABLED=false\n"
+                "="*60
+            )
+    
     spark.sparkContext.setLogLevel("WARN")
-    print("Spark Session created")
+    print("Spark Session created (JVM mode)")
     return spark
 
 # ---- Mock Data ----
@@ -142,13 +207,14 @@ def build_time_feature(df, ts_col="ts"):
     """
     df = df.withColumn("Epoch", F.col(ts_col).cast("long"))
     df = df.withColumn("HourOfDay", F.hour(ts_col))
-    df = df.withColumn("DayOfWeek", F.date_format(ts_col, "u").cast("int")) # 1 -> 7 (Mon -> Sun)
+    # Use built-in dayofweek instead (1=Sun, 7=Sat) and adjust weekend logic if needed.
+    df = df.withColumn("DayOfWeek", F.dayofweek(ts_col))
     df = df.withColumn("Month", F.month(ts_col))
-    df = df.withColumn("is_weekend", (F.col("DayOfWeek").isin([6,7])).cast("int"))
+    df = df.withColumn("is_weekend", (F.col("DayOfWeek").isin([7,1])).cast("int"))
     return df
 
 
-def add_lag_and_rolling_features(df, zone_col="zone", epoch_col="ts_epoch", price_col="price", lags=[1,2], roll_windows=[24]):
+def add_lag_and_rolling_features(df, zone_col="zone", epoch_col="Epoch", price_col="price", lags=[1,2], roll_windows=[24]):
     """
     Add lag and rolling window features based on CONFIG settings.
     Add lag features (lag_{h}) and rolling mean features (roll_{window}h)
@@ -177,6 +243,7 @@ def prepare_features(df):
     df = build_time_feature(df, "ts")
 
     df = add_lag_and_rolling_features(df,
+                                      epoch_col="Epoch",
                                       lags=CONFIG["LAGS"],
                                       roll_windows=CONFIG["ROLL_WINDOWS_HOURS"])
     
@@ -207,7 +274,7 @@ def prepare_features(df):
     return df, feature_cols
 
 #----- Train/Validate/Test by time split -----
-def time_based_split(df, epoch_col="ts_epoch"):
+def time_based_split(df, epoch_col="Epoch"):
     """
     Split DataFrame into train/validation/test using percentiles on epoch time.
     Ensures temporal split (no leakage)
@@ -386,8 +453,14 @@ def score_live_with_object(spark, model_pipeline, live_weather_token: List[float
                                           roll_windows=CONFIG["ROLL_WINDOWS_HOURS"])
     
     # Get the latest row as baseline for lags
-    baseline = recent.orderBy(F.col("Epoch").desc()).limit(1).toPandas().to_dict(orient="records")[0]
+    #baseline = recent.orderBy(F.col("Epoch").desc()).limit(1).toPandas().to_dict(orient="records")[0]
     
+    # FIX: Cast 'ts' to string to avoid Pandas "unit-less datetime64" error
+    recent_for_pandas = recent.withColumn("ts", F.col("ts").cast("string"))
+    
+    baseline = recent_for_pandas.orderBy(F.col("Epoch").desc()).limit(1).toPandas().to_dict(orient="records")[0]
+
+
     feature_data = {}
     feature_data["Demand"] = float(baseline.get("Demand") or 0.0)
 
@@ -500,16 +573,29 @@ def main():
         model_path = save_model_and_metadata(best_model, metadata, CONFIG["MODEL_OUTPUT_PATH"], CONFIG["MODEL_NAME"])
 
         # Demo scoring
+        # Demo scoring
         sample_zone = CONFIG["SAMPLE_ZONE"]
         if sample_zone is None:
             sample_zone = df.select("zone").orderBy(F.col("ts").desc()).limit(1).collect()[0]["zone"]
 
         print("Demo scoring for zone:", sample_zone)
 
-        latest_row = spark.sql(f"SELECT * FROM {CONFIG['HIVE_DB']}.{CONFIG['HIVE_TABLE']} WHERE zone = '{sample_zone}' ORDER BY ts DESC LIMIT 1").collect()
+        # --- FIX STARTS HERE ---
+        # 1. Choose the correct table name based on Mock vs Real data
+        if USE_MOCK_DATA:
+            query_table = CONFIG["HIVE_TABLE"]  # Query 'sample_table'
+        else:
+            query_table = f"{CONFIG['HIVE_DB']}.{CONFIG['HIVE_TABLE']}" # Query 'default.sample_table'
+
+        latest_row = spark.sql(f"SELECT * FROM {query_table} WHERE zone = '{sample_zone}' ORDER BY ts DESC LIMIT 1").collect()
+        
         if latest_row:
             live_token = latest_row[0]["token"]
-            pred_df = score_live_weather(spark, model_path, live_token, zone=sample_zone)
+            
+            # 2. Use 'score_live_with_object' instead of 'score_live_weather'
+            # (Because score_live_weather is empty/commented out in your file)
+            pred_df = score_live_with_object(spark, best_model, live_token, zone=sample_zone, use_mock=USE_MOCK_DATA)
+            
             print("Live weather token prediction:\n", pred_df)
         else:
             print("No data found for demo scoring.")
