@@ -50,9 +50,11 @@ def create_spark_session():
     .appName(CONFIG["APP_NAME"]) \
     .master(CONFIG["SPARK_MASTER"]) \
     .config("spark.sql.shuffle.partitions", 8) \
-    .enableHiveSupport() \
     .getOrCreate()
     )
+    """
+    .enableHiveSupport() \
+    """
 
     spark.sparkContext.setLogLevel("WARN")
     print("Spark Session created")
@@ -214,9 +216,9 @@ def time_based_split(df, epoch_col="ts_epoch"):
     assert sum(fractions) == 1.0, "Train/Valid/Test fractions must sum to 1.0"
     
     # compute split epochs: 70th and 85th percentiles for example (train up to p1, val p1 -> p2, test > p2)
-    p1 = df.select(F.expr(f"percentile_approx({epoch_col}, {CONFIG["TRAIN_FRAC"]})").alias("p1")).collect()[0]["p1"]
-    p2 = df.select(F.expr(f"percentile_approx({epoch_col}, {CONFIG["TRAIN_FRAC"] + CONFIG["VALID_FRAC"]})").alias("p2")).collect()[0]["p2"]
-
+    percentiles = df.approxQuantile(epoch_col, [CONFIG["TRAIN_FRAC"], CONFIG["TRAIN_FRAC"] + CONFIG["VALID_FRAC"]], 0.01)
+    p1, p2 = percentiles[0], percentiles[1]
+    
     train = df.filter(F.col(epoch_col) <= p1)
     val = df.filter((F.col(epoch_col) > p1) & (F.col(epoch_col) <= p2))
     test = df.filter(F.col(epoch_col) > p2)
@@ -296,7 +298,7 @@ def score_live_weather(spark, model_path: str, live_weather_token: List[float], 
     - build a single-row DataFrame with assembled features
     - load model and predict
     """
-    pass
+    """ 
     model = PipelineModel.load(model_path)
 
     table = f"{CONFIG["HIVE_DB"]}.{CONFIG["HIVE_TABLE"]}"
@@ -348,6 +350,8 @@ def score_live_weather(spark, model_path: str, live_weather_token: List[float], 
 
     prediction = model.transform(feature_df)
     return prediction.select("prediction").toPandas()
+    """
+    pass
 
 def score_live_with_object(spark, model_pipeline, live_weather_token: List[float], zone: str, use_mock=False):
     """
@@ -502,7 +506,7 @@ def main():
 
         print("Demo scoring for zone:", sample_zone)
 
-        latest_row = spark.sql(f"SELECT * FROM {CONFIG["HIVE_DB"]}.{CONFIG["HIVE_TABLE"]} WHERE zone = '{sample_zone}' ORDER BY ts DESC LIMIT 1").collect()
+        latest_row = spark.sql(f"SELECT * FROM {CONFIG['HIVE_DB']}.{CONFIG['HIVE_TABLE']} WHERE zone = '{sample_zone}' ORDER BY ts DESC LIMIT 1").collect()
         if latest_row:
             live_token = latest_row[0]["token"]
             pred_df = score_live_weather(spark, model_path, live_token, zone=sample_zone)
