@@ -1,0 +1,14 @@
+{
+  "name": "hdfs-sink",
+  "config": {
+    "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
+    "topics": "weather-live-ingest",
+    "hdfs.url": "hdfs://namenode:8020",
+    "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
+
+    "hive.integration": "true",
+    "hive.metastore.uris": "thrift://hive-metastore:9083",
+    "hive.database": "weather_db",
+    "hive.table.name": "weather_history"
+  }
+}

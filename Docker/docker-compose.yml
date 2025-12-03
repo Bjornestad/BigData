@@ -60,6 +60,8 @@ services:
       # We use 6 partitions to allow for future auto-scaling (up to 6 parallel consumers)
       echo 'Creating topics...'
       
+      #If the amount of partitions need to be changed, the entire thing needs to be deleted and rerun
+      
       kafka-topics --bootstrap-server broker:29092 --create --if-not-exists --topic weather-live-ingest --partitions 6 --replication-factor 1
       
       kafka-topics --bootstrap-server broker:29092 --create --if-not-exists --topic weather-ingest-dlq --partitions 1 --replication-factor 1
