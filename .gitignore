@@ -1,0 +1,218 @@
+# ============================================
+# BigData Weather & Energy Fetcher
+# .gitignore
+# ============================================
+
+# ============================================
+# Data Files (Never commit actual data)
+# ============================================
+data/
+*.parquet
+*.csv
+*.json
+*.tar
+
+# ============================================
+# Kubernetes & Credentials
+# ============================================
+*kubeconfig*.yaml
+*-kubeconfig.yaml
+bd-gr-08-sa-bd-bd-gr-08-kubeconfig.yaml
+.kube/
+secrets/
+*.secret
+
+# ============================================
+# Environment & Configuration
+# ============================================
+.env
+.env.local
+.env.*.local
+config.local.py
+api_keys.txt
+
+# ============================================
+# Python
+# ============================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# pyenv
+.python-version
+
+# ============================================
+# Docker
+# ============================================
+# Docker images and containers (tars)
+*.tar
+bigdata-fetcher.tar
+docker-compose.override.yml
+
+# ============================================
+# IDE & Editors
+# ============================================
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.*.swp
+.*.swo
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+
+# ============================================
+# Operating System
+# ============================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# Linux
+.directory
+.Trash-*
+.nfs*
+
+# ============================================
+# Logs & Temporary Files
+# ============================================
+*.log
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+logs/
+tmp/
+temp/
+
+# ============================================
+# Archive (old/unused files)
+# ============================================
+.archive/
+archive/
+old/
+
+# ============================================
+# Screenshots & Images
+# ============================================
+# Keep specific named screenshots, ignore others
+*.png
+!Screenshot*.png
+# Keep the station map screenshot
+!Screenshot\ from\ 2025-12-01\ 15-26-40.png
+
+# ============================================
+# Build Artifacts
+# ============================================
+*.o
+*.a
+*.out
+*.class
+
+# ============================================
+# Package Managers
+# ============================================
+node_modules/
+package-lock.json
+yarn.lock
+
+# ============================================
+# Misc
+# ============================================
+.cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
