@@ -6,8 +6,8 @@ metadata:
     strimzi.io/cluster: energy-cluster
   namespace: kafka
 spec:
-  partitions: 6
-  replicas: 3
+  partitions: 3
+  replicas: 1
   config:
     retention.ms: 604800000 # 7 Days
 ---
@@ -19,5 +19,5 @@ metadata:
     strimzi.io/cluster: energy-cluster
   namespace: kafka
 spec:
-  partitions: 6
-  replicas: 3
+  partitions: 3
+  replicas: 1

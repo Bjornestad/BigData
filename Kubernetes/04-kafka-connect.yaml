@@ -13,7 +13,6 @@ spec:
       labels:
         app: kafka-connect
     spec:
-      # 1. Init Container: Downloads the plugin before the main app starts
       initContainers:
         - name: install-connector
           image: confluentinc/cp-kafka-connect:7.6.0
@@ -24,16 +23,16 @@ spec:
           volumeMounts:
             - name: plugins-vol
               mountPath: /share/java
-
-      # 2. Main Container: Runs Connect using the downloaded plugin
       containers:
         - name: connect
           image: confluentinc/cp-kafka-connect:7.6.0
           ports:
             - containerPort: 8083
           env:
+            # 1. MATCHES YOUR SERVICE OUTPUT:
             - name: CONNECT_BOOTSTRAP_SERVERS
               value: energy-cluster-kafka-bootstrap:9092
+
             - name: CONNECT_GROUP_ID
               value: k8s-connect-group
             - name: CONNECT_CONFIG_STORAGE_TOPIC
@@ -42,16 +41,31 @@ spec:
               value: connect-offsets
             - name: CONNECT_STATUS_STORAGE_TOPIC
               value: connect-status
+
+            # 2. SINGLE BROKER FIXES:
+            - name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR
+              value: "1"
+            - name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR
+              value: "1"
+            - name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR
+              value: "1"
+
+            # 3. SCHEMA REGISTRY CONNECTION:
             - name: CONNECT_KEY_CONVERTER
               value: io.confluent.connect.avro.AvroConverter
             - name: CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL
-              value: http://schema-registry:8081
+              value: http://schema-registry.kafka.svc:8081
             - name: CONNECT_VALUE_CONVERTER
               value: io.confluent.connect.avro.AvroConverter
             - name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL
-              value: http://schema-registry:8081
+              value: http://schema-registry.kafka.svc:8081
+
             - name: CONNECT_PLUGIN_PATH
               value: /share/java,/usr/share/java
+
+            # 4. THE MISSING VARIABLE (CRITICAL FIX):
+            - name: CONNECT_REST_ADVERTISED_HOST_NAME
+              value: "kafka-connect"
           volumeMounts:
             - name: plugins-vol
               mountPath: /share/java

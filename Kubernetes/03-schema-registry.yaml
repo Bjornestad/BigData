@@ -1,3 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: schema-registry-config
+  namespace: kafka
+data:
+  schema-registry.properties: |
+    # 1. Listen on all interfaces
+    listeners=http://0.0.0.0:8081
+    # 2. Connect to your Kafka Cluster (The Critical Fix)
+    kafkastore.bootstrap.servers=PLAINTEXT://energy-cluster-kafka-bootstrap:9092
+    # 3. Storage settings
+    kafkastore.topic=_schemas
+    kafkastore.topic.replication.factor=1
+    # 4. Debugging
+    debug=true
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,14 +36,25 @@ spec:
           image: confluentinc/cp-schema-registry:7.6.0
           ports:
             - containerPort: 8081
+
+          # --- THE BYPASS COMMAND ---
+          # Run Java directly. Do not use the buggy /etc/confluent/docker/run script.
+          command:
+            - /usr/bin/schema-registry-start
+            - /etc/schema-registry-custom/schema-registry.properties
+
           env:
-            - name: SCHEMA_REGISTRY_HOST_NAME
-              value: schema-registry
-            - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
-              # Note: Connects to the internal Service created by Strimzi
-              value: energy-cluster-kafka-bootstrap:9092
-            - name: SCHEMA_REGISTRY_LISTENERS
-              value: http://0.0.0.0:8081
+            - name: SCHEMA_REGISTRY_HEAP_OPTS
+              value: "-Xmx512M -Xms512M"
+
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/schema-registry-custom
+
+      volumes:
+        - name: config-volume
+          configMap:
+            name: schema-registry-config
 ---
 apiVersion: v1
 kind: Service

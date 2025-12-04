@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: register-schemas-job
+  namespace: kafka
+spec:
+  template:
+    spec:
+      containers:
+        - name: schema-uploader
+          image: alpine:latest
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              # 1. Install dependencies
+              apk add --no-cache curl jq
+              
+              # 2. Wait for Schema Registry
+              echo "Waiting for Schema Registry..."
+              while [ $(curl -s -o /dev/null -w %{http_code} http://schema-registry:8081) -ne 200 ]; do 
+                sleep 5 
+              done
+              
+              # --- REGISTER SCHEMA 1: WEATHER ---
+              echo "Processing Weather Schema..."
+              PAYLOAD_W=$(jq -n --arg s "$(cat /data/weather_station.avsc)" '{schema: $s}')
+              
+              curl -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+              --data "$PAYLOAD_W" \
+              http://schema-registry:8081/subjects/weather-live-ingest-value/versions
+              
+              # --- REGISTER SCHEMA 2: ENERGY ---
+              echo "Processing Energy Schema..."
+              PAYLOAD_E=$(jq -n --arg s "$(cat /data/energy_production.avsc)" '{schema: $s}')
+              
+              curl -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+              --data "$PAYLOAD_E" \
+              http://schema-registry:8081/subjects/energy-predictions-output-value/versions
+              
+              echo "All Schemas Registered!"
+          volumeMounts:
+            - name: schema-vol
+              mountPath: /data
+      volumes:
+        - name: schema-vol
+          configMap:
+            name: schema-files
+      restartPolicy: OnFailure
