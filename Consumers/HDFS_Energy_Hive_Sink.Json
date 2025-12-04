@@ -1,0 +1,25 @@
+{
+  "name": "energy-hive-sink",
+  "config": {
+    "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
+    "tasks.max": "1",
+
+    "topics": "energy-predictions-output",
+
+    "hdfs.url": "hdfs://namenode:8020",
+    "flush.size": "3",
+    "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
+    "hive.integration": "true",
+    "hive.metastore.uris": "thrift://hive-metastore:9083",
+    "hive.database": "default",
+    "hive.table.name": "energy_predictions_history",
+
+    "partitioner.class": "io.confluent.connect.hdfs.partitioner.TimeBasedPartitioner",
+    "partition.duration.ms": "3600000",
+    "path.format": "'year'=YYYY/'month'=MM/'day'=dd/'hour'=HH",
+    "locale": "en-US",
+    "timezone": "UTC",
+
+    "schema.compatibility": "BACKWARD"
+  }
+}

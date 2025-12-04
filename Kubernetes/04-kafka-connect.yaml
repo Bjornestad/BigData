@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-connect
+  namespace: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-connect
+  template:
+    metadata:
+      labels:
+        app: kafka-connect
+    spec:
+      # 1. Init Container: Downloads the plugin before the main app starts
+      initContainers:
+        - name: install-connector
+          image: confluentinc/cp-kafka-connect:7.6.0
+          command:
+            - bash
+            - -c
+            - "confluent-hub install --no-prompt confluentinc/kafka-connect-hdfs:10.1.13 --component-dir /share/java"
+          volumeMounts:
+            - name: plugins-vol
+              mountPath: /share/java
+
+      # 2. Main Container: Runs Connect using the downloaded plugin
+      containers:
+        - name: connect
+          image: confluentinc/cp-kafka-connect:7.6.0
+          ports:
+            - containerPort: 8083
+          env:
+            - name: CONNECT_BOOTSTRAP_SERVERS
+              value: energy-cluster-kafka-bootstrap:9092
+            - name: CONNECT_GROUP_ID
+              value: k8s-connect-group
+            - name: CONNECT_CONFIG_STORAGE_TOPIC
+              value: connect-configs
+            - name: CONNECT_OFFSET_STORAGE_TOPIC
+              value: connect-offsets
+            - name: CONNECT_STATUS_STORAGE_TOPIC
+              value: connect-status
+            - name: CONNECT_KEY_CONVERTER
+              value: io.confluent.connect.avro.AvroConverter
+            - name: CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL
+              value: http://schema-registry:8081
+            - name: CONNECT_VALUE_CONVERTER
+              value: io.confluent.connect.avro.AvroConverter
+            - name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL
+              value: http://schema-registry:8081
+            - name: CONNECT_PLUGIN_PATH
+              value: /share/java,/usr/share/java
+          volumeMounts:
+            - name: plugins-vol
+              mountPath: /share/java
+      volumes:
+        - name: plugins-vol
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-connect
+  namespace: kafka
+spec:
+  ports:
+    - port: 8083
+      targetPort: 8083
+  selector:
+    app: kafka-connect
