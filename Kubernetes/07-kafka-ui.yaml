@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-ui
+  namespace: kafka
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-ui
+  template:
+    metadata:
+      labels:
+        app: kafka-ui
+    spec:
+      containers:
+        - name: kafka-ui
+          image: provectuslabs/kafka-ui:latest
+          ports:
+            - containerPort: 8080
+          env:
+            # 1. Cluster Name & Broker
+            - name: KAFKA_CLUSTERS_0_NAME
+              value: "energy-cluster"
+            - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
+              value: "energy-cluster-kafka-bootstrap:9092"
+
+            # 2. Connect to Zookeeper (Optional but helpful)
+            - name: KAFKA_CLUSTERS_0_ZOOKEEPER
+              value: "energy-cluster-zookeeper-client:2181"
+
+            # 3. Connect to Schema Registry
+            - name: KAFKA_CLUSTERS_0_SCHEMAREGISTRY
+              value: "http://schema-registry.kafka.svc:8081"
+
+            # 4. Connect to Kafka Connect
+            - name: KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME
+              value: "hdfs-connect"
+            - name: KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS
+              value: "http://kafka-connect.kafka.svc:8083"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-ui
+  namespace: kafka
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: kafka-ui
