@@ -17,13 +17,25 @@ spec:
           image: confluentinc/cp-schema-registry:7.5.0
           ports:
             - containerPort: 8081
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Writing manual configuration..."
+              echo "listeners=http://0.0.0.0:8081" > /etc/schema-registry/schema-registry.properties
+              echo "kafkastore.bootstrap.servers=PLAINTEXT://energy-stack-energy-cluster:9092" >> /etc/schema-registry/schema-registry.properties
+
+              echo "kafkastore.topic.replication.factor=3" >> /etc/schema-registry/schema-registry.properties
+              echo "kafkastore.topic=_schemas" >> /etc/schema-registry/schema-registry.properties
+
+              echo "kafkastore.init.timeout.ms=300000" >> /etc/schema-registry/schema-registry.properties
+
+              echo "Starting Schema Registry..."
+              schema-registry-start /etc/schema-registry/schema-registry.properties
+
           env:
-            - name: SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS
-              value: "PLAINTEXT://energy-cluster-kafka:9092"
             - name: SCHEMA_REGISTRY_HOST_NAME
               value: "schema-registry"
-            - name: SCHEMA_REGISTRY_LISTENERS
-              value: "http://0.0.0.0:8081"
 ---
 apiVersion: v1
 kind: Service

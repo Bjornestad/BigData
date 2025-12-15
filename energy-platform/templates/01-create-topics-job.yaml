@@ -8,13 +8,14 @@ spec:
       restartPolicy: Never
       containers:
         - name: kafka-cli
-          image: bitnami/kafka:latest
+          image: public.ecr.aws/bitnami/kafka:3.6.1
+          imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-c"]
           args:
             - |
               echo "Waiting for Kafka..."
-              sleep 45 # Increased wait time to ensure Kafka is ready
+              sleep 45
               echo "Creating topics..."
-              kafka-topics.sh --create --if-not-exists --bootstrap-server energy-cluster-kafka:9092 --topic weather-live-ingest --partitions 3 --replication-factor 1
-              kafka-topics.sh --create --if-not-exists --bootstrap-server energy-cluster-kafka:9092 --topic energy-predictions-output --partitions 3 --replication-factor 1
+              kafka-topics.sh --create --if-not-exists --bootstrap-server energy-cluster-kafka:9092 --topic weather-live-ingest --partitions 3 --replication-factor 3
+              kafka-topics.sh --create --if-not-exists --bootstrap-server energy-cluster-kafka:9092 --topic energy-predictions-output --partitions 3 --replication-factor 3
               echo "Topics created successfully."

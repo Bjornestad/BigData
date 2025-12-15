@@ -21,7 +21,7 @@ spec:
             - name: KAFKA_CLUSTERS_0_NAME
               value: "energy-cluster"
             - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
-              value: "energy-cluster-kafka:9092"
+              value: "energy-stack-energy-cluster:9092"
             - name: KAFKA_CLUSTERS_0_SCHEMAREGISTRY
               value: "http://schema-registry:8081"
             - name: KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME

@@ -14,8 +14,24 @@ spec:
     spec:
       initContainers:
         - name: download-plugins
-          image: busybox:latest
-          command: ["sh", "-c", "wget -q https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-jdbc/versions/10.7.4/confluentinc-kafka-connect-jdbc-10.7.4.zip -O /tmp/jdbc.zip && unzip -q /tmp/jdbc.zip -d /tmp/ && mv /tmp/confluentinc-kafka-connect-jdbc-10.7.4/lib /plugins/jdbc-sink && wget -q https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-hdfs/versions/10.1.0/confluentinc-kafka-connect-hdfs-10.1.0.zip -O /tmp/hdfs.zip && unzip -q /tmp/hdfs.zip -d /tmp/ && mv /tmp/confluentinc-kafka-connect-hdfs-10.1.0/lib /plugins/hdfs-sink"]
+          image: public.ecr.aws/bitnami/os-shell:12
+          securityContext:
+            runAsUser: 0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Downloading JDBC Plugin..."
+              curl -L -o /tmp/jdbc.zip https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-jdbc/versions/10.7.4/confluentinc-kafka-connect-jdbc-10.7.4.zip
+              unzip -q /tmp/jdbc.zip -d /tmp/
+              mv /tmp/confluentinc-kafka-connect-jdbc-10.7.4/lib /plugins/jdbc-sink
+
+              echo "Downloading HDFS Plugin..."
+              curl -L -o /tmp/hdfs.zip https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-hdfs/versions/10.1.0/confluentinc-kafka-connect-hdfs-10.1.0.zip
+              unzip -q /tmp/hdfs.zip -d /tmp/
+              mv /tmp/confluentinc-kafka-connect-hdfs-10.1.0/lib /plugins/hdfs-sink
+
+              echo "Done!"
           volumeMounts:
             - name: plugins-vol
               mountPath: /plugins
@@ -26,7 +42,7 @@ spec:
             - containerPort: 8083
           env:
             - name: CONNECT_BOOTSTRAP_SERVERS
-              value: "energy-cluster-kafka:9092"
+              value: "energy-stack-energy-cluster:9092"
             - name: CONNECT_REST_PORT
               value: "8083"
             - name: CONNECT_GROUP_ID
@@ -47,12 +63,14 @@ spec:
               value: "kafka-connect"
             - name: CONNECT_PLUGIN_PATH
               value: "/usr/share/java,/plugins"
+
             - name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR
-              value: "1"
+              value: "3"
             - name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR
-              value: "1"
+              value: "3"
             - name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR
-              value: "1"
+              value: "3"
+
           volumeMounts:
             - name: plugins-vol
               mountPath: /plugins

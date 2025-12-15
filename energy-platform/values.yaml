@@ -1,9 +1,52 @@
 energy-cluster:
+  image:
+    registry: public.ecr.aws
+    repository: bitnami/kafka
+    tag: 3.6.1
+    pullPolicy: IfNotPresent
+
+  kraft:
+    enabled: false
+
+  zookeeper:
+    enabled: true
+    replicaCount: 1
+    image:
+      registry: public.ecr.aws
+      repository: bitnami/zookeeper
+      tag: 3.9.1
+      pullPolicy: IfNotPresent
+
+  broker:
+    replicaCount: 3
+  controller:
+    replicaCount: 0
+
+  extraEnvVars:
+    - name: KAFKA_ENABLE_KRAFT
+      value: "no"
+    - name: KAFKA_CFG_ZOOKEEPER_CONNECT
+      value: "energy-stack-zookeeper:2181"
+    - name: KAFKA_CFG_OFFSETS_TOPIC_REPLICATION_FACTOR
+      value: "3"
+    - name: KAFKA_CFG_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+      value: "3"
+    - name: KAFKA_CFG_TRANSACTION_STATE_LOG_MIN_ISR
+      value: "2"
+    - name: KAFKA_CFG_DEFAULT_REPLICATION_FACTOR
+      value: "3"
+
+
+  volumePermissions:
+    enabled: true
+    image:
+      registry: public.ecr.aws
+      repository: bitnami/os-shell
+      tag: 12
+      pullPolicy: IfNotPresent
+
   listeners:
     client:
       protocol: PLAINTEXT
-  zookeeper:
-    enabled: true
-  replicaCount: 1
-  zookeeper:
-    replicaCount: 1
+    interbroker:
+      protocol: PLAINTEXT
