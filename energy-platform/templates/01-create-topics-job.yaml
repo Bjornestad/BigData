@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-topics-job
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: kafka-cli
+          image: bitnami/kafka:latest
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Waiting for Kafka..."
+              sleep 45 # Increased wait time to ensure Kafka is ready
+              echo "Creating topics..."
+              kafka-topics.sh --create --if-not-exists --bootstrap-server energy-cluster-kafka:9092 --topic weather-live-ingest --partitions 3 --replication-factor 1
+              kafka-topics.sh --create --if-not-exists --bootstrap-server energy-cluster-kafka:9092 --topic energy-predictions-output --partitions 3 --replication-factor 1
+              echo "Topics created successfully."

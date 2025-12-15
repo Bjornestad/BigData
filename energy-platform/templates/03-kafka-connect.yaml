@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-connect
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-connect
+  template:
+    metadata:
+      labels:
+        app: kafka-connect
+    spec:
+      initContainers:
+        - name: download-plugins
+          image: busybox:latest
+          command: ["sh", "-c", "wget -q https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-jdbc/versions/10.7.4/confluentinc-kafka-connect-jdbc-10.7.4.zip -O /tmp/jdbc.zip && unzip -q /tmp/jdbc.zip -d /tmp/ && mv /tmp/confluentinc-kafka-connect-jdbc-10.7.4/lib /plugins/jdbc-sink && wget -q https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-hdfs/versions/10.1.0/confluentinc-kafka-connect-hdfs-10.1.0.zip -O /tmp/hdfs.zip && unzip -q /tmp/hdfs.zip -d /tmp/ && mv /tmp/confluentinc-kafka-connect-hdfs-10.1.0/lib /plugins/hdfs-sink"]
+          volumeMounts:
+            - name: plugins-vol
+              mountPath: /plugins
+      containers:
+        - name: kafka-connect
+          image: confluentinc/cp-kafka-connect:7.5.0
+          ports:
+            - containerPort: 8083
+          env:
+            - name: CONNECT_BOOTSTRAP_SERVERS
+              value: "energy-cluster-kafka:9092"
+            - name: CONNECT_REST_PORT
+              value: "8083"
+            - name: CONNECT_GROUP_ID
+              value: "connect-cluster-group"
+            - name: CONNECT_CONFIG_STORAGE_TOPIC
+              value: "connect-configs"
+            - name: CONNECT_OFFSET_STORAGE_TOPIC
+              value: "connect-offsets"
+            - name: CONNECT_STATUS_STORAGE_TOPIC
+              value: "connect-status"
+            - name: CONNECT_KEY_CONVERTER
+              value: "org.apache.kafka.connect.storage.StringConverter"
+            - name: CONNECT_VALUE_CONVERTER
+              value: "io.confluent.connect.avro.AvroConverter"
+            - name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL
+              value: "http://schema-registry:8081"
+            - name: CONNECT_REST_ADVERTISED_HOST_NAME
+              value: "kafka-connect"
+            - name: CONNECT_PLUGIN_PATH
+              value: "/usr/share/java,/plugins"
+            - name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR
+              value: "1"
+            - name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR
+              value: "1"
+            - name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR
+              value: "1"
+          volumeMounts:
+            - name: plugins-vol
+              mountPath: /plugins
+      volumes:
+        - name: plugins-vol
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-connect
+spec:
+  ports:
+    - port: 8083
+  selector:
+    app: kafka-connect

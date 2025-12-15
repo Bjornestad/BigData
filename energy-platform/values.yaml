@@ -1,0 +1,9 @@
+energy-cluster:
+  listeners:
+    client:
+      protocol: PLAINTEXT
+  zookeeper:
+    enabled: true
+  replicaCount: 1
+  zookeeper:
+    replicaCount: 1
