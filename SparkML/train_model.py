@@ -358,68 +358,6 @@ def save_model_and_metadata(model_pipeline, metadata: dict, base_dir: str, mode_
     return model_path
 
 # ----- Scoring -----
-def score_live_weather(spark, model_path: str, live_weather_token: List[float], zone: str, use_mock=False):
-    """
-    Score a live weather token by building required features:
-    - fetch most recent row(s) for the zone to compute lags/rolling stats
-    - build a single-row DataFrame with assembled features
-    - load model and predict
-    """
-    """ 
-    model = PipelineModel.load(model_path)
-
-    table = f"{CONFIG["HIVE_DB"]}.{CONFIG["HIVE_TABLE"]}"
-    if zone:
-        recent = spark.sql(f"SELECT * FROM {table} WHERE zone = '{zone}' ORDER BY ts DESC LIMIT 200")
-    else:
-        recent = spark.sql(f"SELECT * FROM {table} ORDER BY ts DESC LIMIT 200")
-
-    recent = recent.withColumn("ts", F.to_timestamp("ts"))
-    recent = recent.withColumn("ts_epoch", F.col("ts").cast("long"))
-
-    if recent.count() == 0:
-        raise ValueError("No recent rows found for scoring.")
-    
-    recent = expand_token(recent, token_size=CONFIG["TOKEN_SIZE"])
-    recent = build_time_feature(recent, "ts")
-    recent = add_lag_and_rolling_features(recent,
-                                          lags=CONFIG["LAGS"],
-                                          roll_windows=CONFIG["ROLL_WINDOWS_HOURS"])
-    
-    baseline = recent.orderBy(F.col("ts_epoch").desc()).limit(1).toPandas().to_dict(orient="records")[0]
-    #Feature dictionary
-    feature_data = {}
-    
-    feature_data["Demand"] = float(baseline.get("Demand") or 0.0)
-
-    now_ts =int(datetime.datetime.now(datetime.timezone.utc).timestamp())
-    dt = datetime.datetime.fromtimestamp(now_ts, datetime.timezone.utc)
-    feature_data["HourOfDay"] = dt.hour
-    feature_data["DayOfWeek"] = int(dt.isoweekday())
-    feature_data["Month"] = dt.month
-    feature_data["is_weekend"] = 1 if feature_data["DayOfWeek"] in [6,7] else 0
-
-    #Lags: Use baseline values or fallback to price
-    for h in CONFIG["LAGS"]:
-        feature_data[f"price_lag_{h}"] = float(baseline.get(f"price_lag_{h}") or baseline.get("price") or 0.0)
-    
-    for w in CONFIG["ROLL_WINDOWS_HOURS"]:
-        feature_data[f"price_roll_mean_{w}h"] = float(baseline.get(f"price_roll_mean_{w}h") or baseline.get("price") or 0.0)
-        feature_data[f"price_roll_std_{w}h"] = float(baseline.get(f"price_roll_std_{w}h") or 0.0)
-        
-    # Token features
-    token = list(live_weather_token or [])
-    token = token + [None] * (CONFIG["TOKEN_SIZE"][:CONFIG["TOKEN_SIZE"]])  # Pad if needed
-    for i, v in enumerate(token):
-        feature_data[f"w_token_{i}"] = float(v) if v is not None else None
-
-    feature_df = spark.createDataFrame([feature_data])
-
-    prediction = model.transform(feature_df)
-    return prediction.select("prediction").toPandas()
-    """
-    pass
-
 def score_live_with_object(spark, model_pipeline, live_weather_token: List[float], zone: str, use_mock=False):
     """
     Modified scoring function that takes the model OBJECT instead of path, 
@@ -572,7 +510,6 @@ def main():
 
         model_path = save_model_and_metadata(best_model, metadata, CONFIG["MODEL_OUTPUT_PATH"], CONFIG["MODEL_NAME"])
 
-        # Demo scoring
         # Demo scoring
         sample_zone = CONFIG["SAMPLE_ZONE"]
         if sample_zone is None:
