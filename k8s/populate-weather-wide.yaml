@@ -1,0 +1,68 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: populate-weather-wide
+  namespace: bd-bd-gr-08
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: hive-transform
+        image: rtdl/hive-metastore:3.1.2
+        command:
+          - /bin/bash
+          - -c
+          - |
+            export HADOOP_HOME=/opt/hadoop-3.3.1
+            export HIVE_HOME=/opt/apache-hive-metastore-3.1.2-bin
+            export PATH=$HIVE_HOME/bin:$HADOOP_HOME/bin:$PATH
+
+            echo "🔄 Transforming raw long-format data to wide-format table"
+            echo "==========================================================="
+
+            beeline -u "jdbc:hive2://hiveserver2:10000" <<'SQL'
+
+            -- Insert into weather_wide by pivoting long-format data
+            -- and filtering for rows where core parameters are NOT NULL
+            INSERT INTO TABLE weather_wide
+            SELECT
+              station_id,
+              station_name,
+              latitude,
+              longitude,
+              year,
+              month,
+              day,
+              hour,
+              minute,
+              MAX(CASE WHEN parameter_id = 'temp_dry' THEN value END) AS temp_dry,
+              MAX(CASE WHEN parameter_id = 'temp_dew' THEN value END) AS temp_dew,
+              MAX(CASE WHEN parameter_id = 'humidity' THEN value END) AS humidity,
+              MAX(CASE WHEN parameter_id = 'wind_speed' THEN value END) AS wind_speed,
+              MAX(CASE WHEN parameter_id = 'wind_dir' THEN value END) AS wind_dir,
+              MAX(CASE WHEN parameter_id = 'pressure' THEN value END) AS pressure
+            FROM weather_observations_raw
+            GROUP BY station_id, station_name, latitude, longitude, year, month, day, hour, minute
+            HAVING
+              MAX(CASE WHEN parameter_id = 'temp_dry' THEN value END) IS NOT NULL
+              AND MAX(CASE WHEN parameter_id = 'temp_dew' THEN value END) IS NOT NULL
+              AND MAX(CASE WHEN parameter_id = 'humidity' THEN value END) IS NOT NULL
+              AND MAX(CASE WHEN parameter_id = 'wind_speed' THEN value END) IS NOT NULL
+              AND MAX(CASE WHEN parameter_id = 'wind_dir' THEN value END) IS NOT NULL
+              AND MAX(CASE WHEN parameter_id = 'pressure' THEN value END) IS NOT NULL;
+
+            -- Verify the result
+            SELECT COUNT(*) as total_records FROM weather_wide;
+
+            SELECT
+              year,
+              COUNT(*) as records_per_year
+            FROM weather_wide
+            GROUP BY year
+            ORDER BY year;
+
+            SQL
+
+            echo ""
+            echo "✅ weather_wide table populated with NULL-filtered wide-format data!"

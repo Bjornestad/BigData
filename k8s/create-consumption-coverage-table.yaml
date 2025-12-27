@@ -1,0 +1,109 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-consumption-coverage-table
+  namespace: bd-bd-gr-08
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: hive-table-creator
+        image: rtdl/hive-metastore:3.1.2
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+
+            echo "================================================"
+            echo "CREATING CONSUMPTION COVERAGE HIVE TABLE"
+            echo "================================================"
+
+            # Configure HDFS
+            export HADOOP_HOME=/opt/hadoop-3.3.1
+            export PATH=$HADOOP_HOME/bin:$PATH
+
+            cat > $HADOOP_HOME/etc/hadoop/core-site.xml <<'HDFS_CONFIG'
+            <?xml version="1.0"?>
+            <configuration>
+              <property>
+                <name>fs.defaultFS</name>
+                <value>hdfs://namenode:9000</value>
+              </property>
+            </configuration>
+            HDFS_CONFIG
+
+            echo ""
+            echo "📁 Creating HDFS directory..."
+            hdfs dfs -mkdir -p /user/hive/warehouse/consumption_coverage_location
+
+            echo ""
+            echo "📤 Uploading consumption coverage data to HDFS..."
+            if [ -f /data/consumption_coverage_data.parquet ]; then
+              echo "File size: $(du -h /data/consumption_coverage_data.parquet | cut -f1)"
+              hdfs dfs -put -f /data/consumption_coverage_data.parquet /user/hive/warehouse/consumption_coverage_location/
+              echo "✓ Upload complete"
+            else
+              echo "✗ ERROR: Parquet file not found at /data/consumption_coverage_data.parquet"
+              echo "Files in /data:"
+              ls -lh /data/ | head -20
+              exit 1
+            fi
+
+            echo ""
+            echo "📂 Verification - Files in HDFS:"
+            hdfs dfs -ls /user/hive/warehouse/consumption_coverage_location/
+            echo ""
+            hdfs dfs -du -s -h /user/hive/warehouse/consumption_coverage_location/
+
+            echo ""
+            echo "📊 Creating Hive table..."
+
+            /opt/hive/bin/beeline -u jdbc:hive2://hiveserver2:10000 <<'HIVE_SQL'
+
+            DROP TABLE IF EXISTS consumption_coverage_location;
+
+            CREATE EXTERNAL TABLE consumption_coverage_location (
+              HourUTC TIMESTAMP COMMENT 'Hour in UTC',
+              HourDK TIMESTAMP COMMENT 'Hour in Danish time',
+              PriceArea STRING COMMENT 'Price area (DK1 or DK2)',
+              ConnectedArea STRING COMMENT 'Source region/country',
+              ViaArea STRING COMMENT 'Transmission route',
+              SharePPM INT COMMENT 'Share in parts per million',
+              ShareMWh DOUBLE COMMENT 'Energy share in MWh',
+              Updated TIMESTAMP COMMENT 'Last update timestamp',
+              timestamp TIMESTAMP COMMENT 'Primary timestamp column',
+              date DATE COMMENT 'Date extracted from timestamp',
+              hour INT COMMENT 'Hour of day',
+              year INT COMMENT 'Year',
+              month INT COMMENT 'Month',
+              day INT COMMENT 'Day of month',
+              weekday INT COMMENT 'Day of week (0=Monday)'
+            )
+            STORED AS PARQUET
+            LOCATION 'hdfs://namenode:9000/user/hive/warehouse/consumption_coverage_location'
+            TBLPROPERTIES ('parquet.compression'='SNAPPY');
+
+            -- Verify table creation
+            SHOW TABLES LIKE 'consumption_coverage_location';
+
+            -- Check row count
+            SELECT COUNT(*) as total_records FROM consumption_coverage_location;
+
+            -- Sample data
+            SELECT * FROM consumption_coverage_location LIMIT 5;
+
+            HIVE_SQL
+
+            echo ""
+            echo "✅ Table created successfully!"
+            echo "================================================"
+
+        volumeMounts:
+        - name: data-storage
+          mountPath: /data
+      volumes:
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: weather-data-pvc

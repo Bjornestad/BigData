@@ -1,0 +1,56 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: copy-new-stations-to-hdfs
+  namespace: bd-bd-gr-08
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: hdfs-copier
+        image: rtdl/hive-metastore:3.1.2
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+
+            export HADOOP_HOME=/opt/hadoop-3.3.1
+            export PATH=$HADOOP_HOME/bin:$PATH
+
+            echo "📦 Configuring HDFS client..."
+
+            cat > $HADOOP_HOME/etc/hadoop/core-site.xml <<'HDFS_CONFIG'
+            <?xml version="1.0"?>
+            <configuration>
+              <property>
+                <name>fs.defaultFS</name>
+                <value>hdfs://namenode:9000</value>
+              </property>
+            </configuration>
+            HDFS_CONFIG
+
+            echo "📁 Files in PVC:"
+            ls -lh /data/weather_all_stations/*.parquet | wc -l
+            echo ""
+
+            echo "📤 Copying new station data to HDFS (merging with existing)..."
+            hdfs dfs -put -f /data/weather_all_stations/*.parquet /user/hive/warehouse/weather_raw/
+
+            echo "✅ Copy complete"
+            echo ""
+
+            echo "📂 Verification - Files in HDFS weather_raw:"
+            hdfs dfs -ls /user/hive/warehouse/weather_raw/ | grep parquet | wc -l
+            echo ""
+            echo "Total size:"
+            hdfs dfs -du -s -h /user/hive/warehouse/weather_raw/
+
+        volumeMounts:
+        - name: data-storage
+          mountPath: /data
+      volumes:
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: weather-data-pvc

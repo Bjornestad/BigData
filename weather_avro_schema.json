@@ -1,0 +1,96 @@
+{
+  "type": "record",
+  "name": "WeatherObservation",
+  "namespace": "dk.dmi.weather",
+  "doc": "Real-time weather observation from DMI API",
+  "fields": [
+    {
+      "name": "station_id",
+      "type": "string",
+      "doc": "DMI station identifier"
+    },
+    {
+      "name": "station_name",
+      "type": "string",
+      "doc": "Human-readable station name"
+    },
+    {
+      "name": "timestamp",
+      "type": "long",
+      "logicalType": "timestamp-millis",
+      "doc": "Observation timestamp in milliseconds since epoch"
+    },
+    {
+      "name": "latitude",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Station latitude"
+    },
+    {
+      "name": "longitude",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Station longitude"
+    },
+    {
+      "name": "temp_dry",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Dry bulb temperature in Celsius"
+    },
+    {
+      "name": "temp_dew",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Dew point temperature in Celsius"
+    },
+    {
+      "name": "humidity",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Relative humidity in percent"
+    },
+    {
+      "name": "wind_speed",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Wind speed in m/s"
+    },
+    {
+      "name": "wind_dir",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Wind direction in degrees"
+    },
+    {
+      "name": "pressure",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Atmospheric pressure in hPa"
+    },
+    {
+      "name": "pressure_at_sea",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Sea level pressure in hPa"
+    },
+    {
+      "name": "precip_past1h",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Precipitation in past hour in mm"
+    },
+    {
+      "name": "cloud_cover",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Cloud cover in percent"
+    },
+    {
+      "name": "visibility",
+      "type": ["null", "double"],
+      "default": null,
+      "doc": "Visibility in meters"
+    }
+  ]
+}

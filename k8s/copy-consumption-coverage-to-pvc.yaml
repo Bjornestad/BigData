@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: data-copier
+  namespace: bd-bd-gr-08
+spec:
+  restartPolicy: Never
+  containers:
+  - name: copier
+    image: busybox
+    command: ['sh', '-c', 'sleep 3600']
+    volumeMounts:
+    - name: data-storage
+      mountPath: /data
+  volumes:
+  - name: data-storage
+    persistentVolumeClaim:
+      claimName: weather-data-pvc

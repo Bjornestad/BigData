@@ -1,0 +1,216 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fetch-YYYY-MM
+  namespace: bd-bd-gr-08
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+      - name: fetch-data
+        image: python:3.10-slim
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2000m"
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+        env:
+        - name: START_DATE
+          value: "YYYY-MM-01"
+        - name: END_DATE
+          value: "YYYY-MM-DD"
+        - name: API_KEY
+          valueFrom:
+            configMapKeyRef:
+              name: dmi-api-config
+              key: API_KEY
+        command:
+          - /bin/bash
+          - -c
+          - |
+            pip install -q requests pandas pyarrow
+
+            python3 -u <<'PYTHON'
+            import os, sys, requests, pandas as pd
+            from datetime import datetime
+            import time
+
+            START_DATE = os.getenv('START_DATE')
+            END_DATE = os.getenv('END_DATE')
+            API_KEY = os.getenv('API_KEY')
+
+            print(f"🌤️  Fetching Weather Data: {START_DATE} to {END_DATE}", flush=True)
+            sys.stdout.flush()
+
+            STATION_NAMES = {
+                "06019": "Silstrup", "06030": "Flyvestation Ålborg", "06031": "Tylstrup",
+                "06032": "Stenhøj", "06034": "Sindal Lufthavn", "06041": "Skagen Fyr",
+                "06049": "Hald Vest", "06051": "Vestervig", "06052": "Thyborøn",
+                "06056": "Mejrup", "06058": "Hvide Sande", "06060": "Flyvestation Karup",
+                "06065": "Års Syd", "06068": "Isenvad", "06069": "Foulum",
+                "06070": "Århus Lufthavn", "06072": "Ødum", "06073": "Sletterhage Fyr",
+                "06074": "Århus Syd", "06079": "Anholt Havn", "06080": "Esbjerg Lufthavn",
+                "06081": "Blåvandshuk Fyr", "06082": "Borris", "06088": "Nordby",
+                "06093": "Vester Vedsted", "06096": "Rømø/Juvre", "06102": "Bygholm Landbrugsskole",
+                "06104": "Billund Lufthavn", "06108": "Kolding Lufthavn", "06109": "Askov",
+                "06110": "Flyvestation Skrydstrup", "06116": "Store Jyndevad", "06118": "Sønderborg Lufthavn",
+                "06119": "Kegnæs Fyr", "06120": "Odense Lufthavn", "06123": "Ørnebjerg",
+                "06124": "Beldringe", "06126": "Kirstinebjerg", "06132": "Sydfyns Flyveplads",
+                "06135": "Hammer Odde Fyr", "06138": "Christiansø", "06141": "Rønne Lufthavn",
+                "06149": "Gedser", "06151": "Omø Fyr", "06156": "Holbæk Flyveplads",
+                "06159": "Røsnæs Fyr", "06168": "Asnæs", "06169": "Nakkehoved Fyr",
+                "06170": "Nordhavn", "06180": "København Lufthavn", "06181": "Jægersborg",
+                "06183": "Drogden Fyr", "06186": "Risø", "06187": "Landbohøjskolen",
+                "06188": "Kl. Valby", "06190": "Stevns Fyr", "06193": "Vordingborg",
+            }
+
+            SYNOP_STATIONS = list(STATION_NAMES.keys())
+
+            def fetch_weather_data(station_id, start_date, end_date):
+                url = "https://dmigw.govcloud.dk/v2/metObs/collections/observation/items"
+                params = {
+                    'api-key': API_KEY,
+                    'stationId': station_id,
+                    'datetime': f'{start_date}T00:00:00Z/{end_date}T23:59:59Z',
+                    'limit': 300000
+                }
+                try:
+                    response = requests.get(url, params=params, timeout=60)
+                    response.raise_for_status()
+                    return response.json().get('features', [])
+                except Exception as e:
+                    print(f"  ⚠️  {station_id}: {e}", flush=True)
+                    return []
+
+            # STEP 1: Fetch weather data
+            print(f"\n{'='*60}", flush=True)
+            print(f"STEP 1: Fetching data for {len(SYNOP_STATIONS)} stations", flush=True)
+            print(f"{'='*60}", flush=True)
+            sys.stdout.flush()
+
+            all_records = []
+            for idx, station_id in enumerate(SYNOP_STATIONS, 1):
+                features = fetch_weather_data(station_id, START_DATE, END_DATE)
+
+                for feature in features:
+                    props = feature.get('properties', {})
+                    geom = feature.get('geometry', {}).get('coordinates', [None, None])
+                    all_records.append({
+                        'station_id': station_id,
+                        'station_name': STATION_NAMES[station_id],
+                        'parameter_id': props.get('parameterId'),
+                        'timestamp': props.get('observed'),
+                        'value': props.get('value'),
+                        'longitude': geom[0],
+                        'latitude': geom[1]
+                    })
+
+                if idx % 10 == 0:
+                    print(f"  Progress: {idx}/{len(SYNOP_STATIONS)} ({len(all_records):,} records)", flush=True)
+                    sys.stdout.flush()
+
+                time.sleep(0.2)
+
+            print(f"\n✓ Fetched {len(all_records):,} raw records", flush=True)
+
+            # STEP 2: Process to wide format
+            print(f"\n{'='*60}", flush=True)
+            print(f"STEP 2: Processing to wide format", flush=True)
+            print(f"{'='*60}", flush=True)
+            sys.stdout.flush()
+
+            df = pd.DataFrame(all_records)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df['year'] = df['timestamp'].dt.year
+            df['month'] = df['timestamp'].dt.month
+            df['day'] = df['timestamp'].dt.day
+            df['hour'] = df['timestamp'].dt.hour
+            df['minute'] = df['timestamp'].dt.minute
+            df = df.drop(columns=['timestamp'])
+
+            df_wide = df.pivot_table(
+                index=['station_id', 'station_name', 'latitude', 'longitude',
+                       'year', 'month', 'day', 'hour', 'minute'],
+                columns='parameter_id',
+                values='value',
+                aggfunc='first'
+            ).reset_index()
+            df_wide.columns.name = None
+
+            print(f"  Wide format: {len(df_wide):,} records (RAW - no filtering)", flush=True)
+            sys.stdout.flush()
+
+            # STEP 3: Save RAW data to PVC
+            print(f"\n{'='*60}", flush=True)
+            print(f"STEP 3: Saving RAW data to PVC", flush=True)
+            print(f"{'='*60}", flush=True)
+            sys.stdout.flush()
+
+            os.makedirs('/data/weather_raw_monthly', exist_ok=True)
+            filename = f"/data/weather_raw_monthly/weather_{START_DATE[:7].replace('-', '')}.parquet"
+            df_wide.to_parquet(filename, engine='pyarrow', compression='snappy', index=False)
+
+            print(f"✅ Saved to PVC: {filename}", flush=True)
+            print(f"   Records: {len(df_wide):,}", flush=True)
+            print(f"   Columns: {len(df_wide.columns)}", flush=True)
+            sys.stdout.flush()
+
+            PYTHON
+        volumeMounts:
+        - name: data-storage
+          mountPath: /data
+      containers:
+      - name: copy-to-hdfs
+        image: rtdl/hive-metastore:3.1.2
+        env:
+        - name: START_DATE
+          value: "YYYY-MM-01"
+        - name: HADOOP_HOME
+          value: "/opt/hadoop-3.3.1"
+        - name: PATH
+          value: "/opt/hadoop-3.3.1/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        command:
+          - /bin/bash
+          - -c
+          - |
+            export HADOOP_HOME=/opt/hadoop-3.3.1
+            export PATH=$HADOOP_HOME/bin:$PATH
+
+            MONTH_FILE="weather_${START_DATE:0:4}${START_DATE:5:2}.parquet"
+            YEAR="${START_DATE:0:4}"
+            MONTH="${START_DATE:5:2}"
+
+            echo "============================================================"
+            echo "STEP 4: Copying to HDFS"
+            echo "============================================================"
+
+            # Create HDFS directory structure
+            hdfs dfs -mkdir -p /user/hive/warehouse/weather_raw/${YEAR}/${MONTH}/
+
+            # Copy file to HDFS
+            echo "Copying /data/weather_raw_monthly/${MONTH_FILE} to HDFS..."
+            hdfs dfs -put -f /data/weather_raw_monthly/${MONTH_FILE} /user/hive/warehouse/weather_raw/${YEAR}/${MONTH}/
+
+            if [ $? -eq 0 ]; then
+                echo "✅ Successfully copied to HDFS: /user/hive/warehouse/weather_raw/${YEAR}/${MONTH}/${MONTH_FILE}"
+
+                # Verify
+                echo ""
+                echo "Verification:"
+                hdfs dfs -ls /user/hive/warehouse/weather_raw/${YEAR}/${MONTH}/
+                hdfs dfs -du -s -h /user/hive/warehouse/weather_raw/${YEAR}/${MONTH}/
+            else
+                echo "❌ Failed to copy to HDFS"
+                exit 1
+            fi
+        volumeMounts:
+        - name: data-storage
+          mountPath: /data
+      volumes:
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: weather-data-pvc

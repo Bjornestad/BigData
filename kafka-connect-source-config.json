@@ -1,0 +1,11 @@
+{
+  "name": "weather-avro-source",
+  "config": {
+    "connector.class": "io.confluent.connect.avro.AvroConverter",
+    "tasks.max": "1",
+    "topic": "weather-realtime",
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://schema-registry:8081",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter"
+  }
+}

@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: hdfs-copier
+  namespace: bd-bd-gr-08
+spec:
+  restartPolicy: Never
+  containers:
+  - name: copier
+    image: apache/hadoop:3.3.6
+    command:
+      - /bin/bash
+      - -c
+      - |
+        echo "📁 Copying new weather data to HDFS..."
+        echo "Files to copy: $(ls /data/weather_all_stations/*.parquet | wc -l)"
+        echo ""
+
+        # Copy files one by one to avoid argument list too long
+        count=0
+        for file in /data/weather_all_stations/*.parquet; do
+          hdfs dfs -put "$file" /user/hive/warehouse/weather_new_stations/
+          ((count++))
+          if [ $((count % 10)) -eq 0 ]; then
+            echo "  Copied $count files..."
+          fi
+        done
+
+        echo ""
+        echo "✅ Copy complete! Copied $count files"
+        echo ""
+        echo "Files in HDFS:"
+        hdfs dfs -ls /user/hive/warehouse/weather_new_stations/ | grep parquet | wc -l
+        echo ""
+        echo "Total size:"
+        hdfs dfs -du -s -h /user/hive/warehouse/weather_new_stations/
+
+    volumeMounts:
+    - name: data
+      mountPath: /data
+  volumes:
+  - name: data
+    persistentVolumeClaim:
+      claimName: weather-data-pvc

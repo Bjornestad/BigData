@@ -1,0 +1,55 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: update-station-metadata
+  namespace: bd-bd-gr-08
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: hdfs-updater
+        image: rtdl/hive-metastore:3.1.2
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+
+            export HADOOP_HOME=/opt/hadoop-3.3.1
+            export PATH=$HADOOP_HOME/bin:$PATH
+
+            echo "📦 Configuring HDFS client..."
+
+            cat > $HADOOP_HOME/etc/hadoop/core-site.xml <<'HDFS_CONFIG'
+            <?xml version="1.0"?>
+            <configuration>
+              <property>
+                <name>fs.defaultFS</name>
+                <value>hdfs://namenode:9000</value>
+              </property>
+            </configuration>
+            HDFS_CONFIG
+
+            echo "🗑️ Removing old station metadata (with Faroese stations)..."
+            hdfs dfs -rm -f /user/hive/warehouse/station_metadata/station_metadata.parquet
+
+            echo "📤 Uploading updated station metadata (140 Danish stations only)..."
+            hdfs dfs -put -f /data/station_metadata.parquet /user/hive/warehouse/station_metadata/
+
+            echo "✅ Update complete"
+            echo ""
+
+            echo "📂 Verification - Files in HDFS:"
+            hdfs dfs -ls /user/hive/warehouse/station_metadata/
+            echo ""
+            echo "Total size:"
+            hdfs dfs -du -s -h /user/hive/warehouse/station_metadata/
+
+        volumeMounts:
+        - name: data-storage
+          mountPath: /data
+      volumes:
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: weather-data-pvc

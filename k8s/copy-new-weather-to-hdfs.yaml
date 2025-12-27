@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: copy-new-weather-to-hdfs
+  namespace: bd-bd-gr-08
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: hdfs-copy
+        image: apache/hadoop:3.3.6
+        command:
+          - /bin/bash
+          - -c
+          - |
+            echo "📁 Copying new weather station data from PVC to HDFS..."
+            echo ""
+
+            # Create HDFS directory for new stations
+            hdfs dfs -mkdir -p /user/hive/warehouse/weather_new_stations
+
+            # List files to copy
+            echo "Files in PVC:"
+            ls -lh /data/weather_all_stations/*.parquet | wc -l
+            echo ""
+
+            # Copy all parquet files
+            echo "Copying parquet files to HDFS..."
+            hdfs dfs -put /data/weather_all_stations/*.parquet /user/hive/warehouse/weather_new_stations/
+
+            echo ""
+            echo "✅ Copy complete!"
+            echo ""
+
+            # Verify
+            echo "Files in HDFS:"
+            hdfs dfs -ls /user/hive/warehouse/weather_new_stations/ | grep parquet | wc -l
+
+            echo ""
+            echo "Total size:"
+            hdfs dfs -du -s -h /user/hive/warehouse/weather_new_stations/
+
+        volumeMounts:
+        - name: data-storage
+          mountPath: /data
+        env:
+        - name: HADOOP_USER_NAME
+          value: "hive"
+      volumes:
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: weather-data-pvc
