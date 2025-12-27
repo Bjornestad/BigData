@@ -15,29 +15,59 @@ from pyspark.ml.tuning import TrainValidationSplit, ParamGridBuilder
 
 CONFIG = {
     "HIVE_DB" : "default",
-    "HIVE_TABLE" : "sample_table",
+    "HIVE_TABLE" : "ml_training_data",  # ML dataset table
+    "HIVE_METASTORE_URI": "thrift://hive-metastore:9083",  # Hive metastore connection
 
-    "MODEL_OUTPUT_PATH" : "./SparkML/models", 
-    "MODEL_NAME" : "spark_model",
+    "MODEL_OUTPUT_PATH" : "./SparkML/models",
+    "MODEL_NAME" : "energy_model",
 
-    "TOKEN_SIZE" : 8, 
-    
-    "TRAIN_FRAC" : 0.7,
-    "VALID_FRAC" : 0.15,
-    "TEST_FRAC" : 0.15,
+    # Weather features (inputs)
+    "WEATHER_FEATURES": [
+        "wind_speed_avg",
+        "wind_speed_max",
+        "wind_direction_sin",
+        "wind_direction_cos",
+        "solar_radiation_1h",
+        "sunshine_duration_1h",
+        "cloud_cover_avg",
+        "n_stations_wind",
+        "n_stations_solar"
+    ],
 
-    # Time-series feature settings (hours)
-    "LAGS": [1, 2, 24],        # lag in hours
-    "ROLL_WINDOWS_HOURS": [3, 24, 168],  # rolling windows in hours (3hr, 24hr, 7d)
+    # Temporal features (inputs)
+    "TEMPORAL_FEATURES": [
+        "month_of_year",
+        "hour_of_day"
+    ],
 
-    # Model hyperparams (search space) -- Reduced for faster mock testing
-    "RF": {"numTrees": [10, 20], "maxDepth": [5]}, # Set numTrees to [50, 100] and maxDepth to [6,10] for real runs 
-    "GBT": {"maxIter": [10], "maxDepth": [4]}, # Set maxIter to [50, 100] and maxDepth to [4,8] for real runs
+    # Categorical features
+    "CATEGORICAL_FEATURES": ["dk_area"],
+
+    # Target variables (outputs)
+    "PRODUCTION_TARGET": "total_production_mwh",
+    "CONSUMPTION_TARGET": "total_consumption_mwh",
+
+    # Training parameters
+    "TRAIN_START_YEAR": 2021,
+    "TRAIN_END_YEAR": 2024,
+    "VAL_YEAR": 2025,
+    "VAL_MONTHS": [1,2,3,4,5,6,7,8,9,10],  # Jan-Oct
+    "TEST_YEAR": 2025,
+    "TEST_MONTH": 11,  # November
+
+    "TOKEN_SIZE" : 8,  # Keep for backward compatibility
+    "LAGS": [1, 2, 24],
+    "ROLL_WINDOWS_HOURS": [3, 24, 168],
+
+    # Model hyperparams (search space)
+    "RF": {"numTrees": [50, 100], "maxDepth": [6, 10]},  # Production settings
+    "GBT": {"maxIter": [50, 100], "maxDepth": [4, 8]},  # Production settings
 
     "SPARK_MASTER" : "local[*]",
-    "APP_NAME" : "SparkApp",
+    "APP_NAME" : "EnergyPredictionML",
 
     "SAMPLE_ZONE": None,
+    "USE_MOCK_DATA": False,  # Set to True to test with mock data
 }
 
 
@@ -81,17 +111,20 @@ def create_spark_session():
     # Create session with explicit configs to avoid Connect
     # IMPORTANT: Set Spark Connect disable configs BEFORE setting master
     # to prevent PySpark from detecting Connect URLs
-    spark = ( SparkSession.builder \
-    .appName(CONFIG["APP_NAME"]) \
-    .config("spark.sql.connect.enabled", "false") \
-    .config("spark.sql.connect.server.enabled", "false") \
-    .config("spark.sql.shuffle.partitions", 8) \
-    .master(CONFIG["SPARK_MASTER"]) \
-    .getOrCreate()
-    )
-    """
-    .enableHiveSupport() \
-    """
+    builder = SparkSession.builder \
+        .appName(CONFIG["APP_NAME"]) \
+        .config("spark.sql.connect.enabled", "false") \
+        .config("spark.sql.connect.server.enabled", "false") \
+        .config("spark.sql.shuffle.partitions", 8) \
+        .master(CONFIG["SPARK_MASTER"])
+
+    # Add Hive support if metastore URI is configured
+    if not CONFIG["USE_MOCK_DATA"] and CONFIG.get("HIVE_METASTORE_URI"):
+        builder = builder.config("hive.metastore.uris", CONFIG["HIVE_METASTORE_URI"]) \
+                        .enableHiveSupport()
+        print(f"Hive metastore configured: {CONFIG['HIVE_METASTORE_URI']}")
+
+    spark = builder.getOrCreate()
 
     # Check if we're in Connect mode (Connect sessions don't have sparkContext)
     if not hasattr(spark, 'sparkContext'):
@@ -171,7 +204,7 @@ def load_hive_data(spark, use_mock=False):
 
     if use_mock:
         df = create_mock_data(spark, num_rows=2000)
-        
+
         # Register as Temp View so SQL queries in score_live_weather work
         # We handle the "database.table" naming by registering it strictly as the table name
         # and adjusting the query logic slightly or relying on Spark resolving it.
@@ -180,12 +213,29 @@ def load_hive_data(spark, use_mock=False):
     else:
         db = CONFIG["HIVE_DB"]
         table = CONFIG["HIVE_TABLE"]
-        sql = f"SELECT * FROM {db}.{table}" # Edit * to select specific columns if needed
-        df = spark.sql(sql)
 
-        #Ensure correct schema and types
-        df = df.withColumn("ts", F.to_timestamp("ts"))
-    return df
+        # Try loading from Hive table first
+        try:
+            print(f"Loading ML dataset from Hive table: {db}.{table}")
+            df = spark.table(f"{db}.{table}")
+            print(f"Loaded {df.count()} rows from Hive table")
+            return df
+        except Exception as e:
+            print(f"Could not load from Hive table: {e}")
+            print("Attempting to run ml_dataset_simple.sql query instead...")
+
+            # If table doesn't exist, try running the query directly
+            sql_file = "../ml_dataset_simple.sql"
+            try:
+                with open(sql_file, 'r') as f:
+                    query = f.read()
+                df = spark.sql(query)
+                print(f"Loaded {df.count()} rows from SQL query")
+                return df
+            except Exception as e2:
+                print(f"Failed to run SQL query: {e2}")
+                raise RuntimeError(f"Could not load ML dataset from Hive table or SQL file")
+
 
 #----- Feature Engineering -----
 
@@ -234,80 +284,162 @@ def add_lag_and_rolling_features(df, zone_col="zone", epoch_col="Epoch", price_c
     
     return df
 
-def prepare_features(df):
+def prepare_features(df, use_mock=False):
     """
-    Complete feature engineering pipelin on the Dataframe recieved
+    Complete feature engineering pipeline on the DataFrame received
+
+    For mock data: uses old token-based features
+    For real ML data: uses weather + temporal features from ml_training_data
     """
-    df = expand_token(df, token_size=CONFIG["TOKEN_SIZE"])
+    if use_mock:
+        # Old token-based feature engineering for mock data
+        df = expand_token(df, token_size=CONFIG["TOKEN_SIZE"])
+        df = build_time_feature(df, "ts")
+        df = add_lag_and_rolling_features(df,
+                                          epoch_col="Epoch",
+                                          lags=CONFIG["LAGS"],
+                                          roll_windows=CONFIG["ROLL_WINDOWS_HOURS"])
 
-    df = build_time_feature(df, "ts")
+        feature_cols = ["Demand", "HourOfDay", "DayOfWeek", "Month", "is_weekend"]
 
-    df = add_lag_and_rolling_features(df,
-                                      epoch_col="Epoch",
-                                      lags=CONFIG["LAGS"],
-                                      roll_windows=CONFIG["ROLL_WINDOWS_HOURS"])
-    
-    # Create feature column list (dropping identifiers)
-    # Numeric features from example: demand, lags, rollings, time-of-day, weather tokens
+        for h in CONFIG["LAGS"]:
+            feature_cols.append(f"price_lag_{h}")
 
-    feature_cols = ["Demand", "HourOfDay", "DayOfWeek", "Month", "is_weekend"]
+        for w in CONFIG["ROLL_WINDOWS_HOURS"]:
+            feature_cols.append(f"price_roll_mean_{w}h")
+            feature_cols.append(f"price_roll_std_{w}h")
 
-    # adding lags
-    for h in CONFIG["LAGS"]:
-        feature_cols.append(f"price_lag_{h}")
+        for i in range(CONFIG["TOKEN_SIZE"]):
+            feature_cols.append(f"token_{i}")
 
-    # add rolling stats
-    for w in CONFIG["ROLL_WINDOWS_HOURS"]:
-        feature_cols.append(f"price_roll_mean_{w}h")
-        feature_cols.append(f"price_roll_std_{w}h")
+        df = df.filter(F.col("price").isNotNull())
 
-    # add Token columns
-    for i in range(CONFIG["TOKEN_SIZE"]):
-        feature_cols.append(f"token_{i}")
-    
-    # Drop rows with null target
-    df = df.filter(F.col("price").isNotNull())  
-    
-    if "Demand" not in df.columns:
-        if "Demand" in feature_cols: feature_cols.remove("Demand")
-    
+        if "Demand" not in df.columns:
+            if "Demand" in feature_cols: feature_cols.remove("Demand")
+
+    else:
+        # New ML dataset features (weather + temporal)
+        feature_cols = CONFIG["WEATHER_FEATURES"] + CONFIG["TEMPORAL_FEATURES"]
+
+        # Filter rows with null targets
+        df = df.filter(
+            F.col(CONFIG["PRODUCTION_TARGET"]).isNotNull() &
+            F.col(CONFIG["CONSUMPTION_TARGET"]).isNotNull()
+        )
+
+        print(f"\nFeatures ({len(feature_cols)}):")
+        for feat in feature_cols:
+            print(f"  - {feat}")
+        print(f"Categorical: {CONFIG['CATEGORICAL_FEATURES']}")
+        print(f"Target 1: {CONFIG['PRODUCTION_TARGET']}")
+        print(f"Target 2: {CONFIG['CONSUMPTION_TARGET']}")
+
     return df, feature_cols
 
 #----- Train/Validate/Test by time split -----
-def time_based_split(df, epoch_col="Epoch"):
+def time_based_split(df, use_mock=False):
     """
-    Split DataFrame into train/validation/test using percentiles on epoch time.
+    Split DataFrame into train/validation/test using time-based splits.
     Ensures temporal split (no leakage)
+
+    For mock data: uses percentiles on epoch
+    For ML data: uses year/month from CONFIG
     """
-    fractions = [CONFIG["TRAIN_FRAC"], CONFIG["VALID_FRAC"], CONFIG["TEST_FRAC"]]
-    assert sum(fractions) == 1.0, "Train/Valid/Test fractions must sum to 1.0"
-    
-    # compute split epochs: 70th and 85th percentiles for example (train up to p1, val p1 -> p2, test > p2)
-    percentiles = df.approxQuantile(epoch_col, [CONFIG["TRAIN_FRAC"], CONFIG["TRAIN_FRAC"] + CONFIG["VALID_FRAC"]], 0.01)
-    p1, p2 = percentiles[0], percentiles[1]
-    
-    train = df.filter(F.col(epoch_col) <= p1)
-    val = df.filter((F.col(epoch_col) > p1) & (F.col(epoch_col) <= p2))
-    test = df.filter(F.col(epoch_col) > p2)
-    
-    return train, val, test, p1, p2
+    if use_mock:
+        # Old percentile-based split for mock data
+        epoch_col = "Epoch"
+        fractions = [CONFIG.get("TRAIN_FRAC", 0.7), CONFIG.get("VALID_FRAC", 0.15), CONFIG.get("TEST_FRAC", 0.15)]
+        assert abs(sum(fractions) - 1.0) < 0.01, "Train/Valid/Test fractions must sum to 1.0"
+
+        percentiles = df.approxQuantile(epoch_col, [fractions[0], fractions[0] + fractions[1]], 0.01)
+        p1, p2 = percentiles[0], percentiles[1]
+
+        train = df.filter(F.col(epoch_col) <= p1)
+        val = df.filter((F.col(epoch_col) > p1) & (F.col(epoch_col) <= p2))
+        test = df.filter(F.col(epoch_col) > p2)
+
+        return train, val, test, p1, p2
+    else:
+        # New time-based split for ML dataset
+        # Training: 2021-2024
+        train = df.filter(
+            (F.col("year") >= CONFIG["TRAIN_START_YEAR"]) &
+            (F.col("year") <= CONFIG["TRAIN_END_YEAR"])
+        )
+
+        # Validation: Jan-Oct 2025
+        val = df.filter(
+            (F.col("year") == CONFIG["VAL_YEAR"]) &
+            (F.col("month").isin(CONFIG["VAL_MONTHS"]))
+        )
+
+        # Test: Nov 2025
+        test = df.filter(
+            (F.col("year") == CONFIG["TEST_YEAR"]) &
+            (F.col("month") == CONFIG["TEST_MONTH"])
+        )
+
+        print(f"\nTime-based splits:")
+        print(f"  Train: {CONFIG['TRAIN_START_YEAR']}-{CONFIG['TRAIN_END_YEAR']}")
+        print(f"  Val: {CONFIG['VAL_YEAR']} months {CONFIG['VAL_MONTHS']}")
+        print(f"  Test: {CONFIG['TEST_YEAR']}-{CONFIG['TEST_MONTH']:02d}")
+
+        return train, val, test, None, None
 
 #----- Spark Pipeline ------
-def build_pipeline(feature_cols: List[str], label_col="price", model_type="RF"):
-    """Return a Pipeline instance with Imputer, Assembler, Scaler, and estimator placeholder"""
+def build_pipeline(feature_cols: List[str], label_col="price", model_type="RF", include_categorical=False):
+    """Return a Pipeline instance with Imputer, Assembler, Scaler, and estimator placeholder
 
-    imputer = Imputer(inputCols=feature_cols, outputCols=feature_cols)
-    assembler = VectorAssembler(inputCols=feature_cols, outputCol="features_raw", handleInvalid="keep")
+    Args:
+        feature_cols: List of numeric feature column names
+        label_col: Target variable column name
+        model_type: "RF" or "GBT"
+        include_categorical: If True, adds StringIndexer + OneHotEncoder for dk_area
+    """
+    from pyspark.ml.feature import StringIndexer, OneHotEncoder
+
+    stages = []
+    assembler_cols = feature_cols.copy()
+
+    # Handle categorical feature (dk_area) if needed
+    if include_categorical and "dk_area" in CONFIG.get("CATEGORICAL_FEATURES", []):
+        indexer = StringIndexer(
+            inputCol="dk_area",
+            outputCol="dk_area_indexed",
+            handleInvalid="keep"
+        )
+        encoder = OneHotEncoder(
+            inputCols=["dk_area_indexed"],
+            outputCols=["dk_area_encoded"]
+        )
+        stages.extend([indexer, encoder])
+        assembler_cols.append("dk_area_encoded")
+
+    # Impute missing values
+    imputer = Imputer(inputCols=feature_cols, outputCols=feature_cols, strategy="mean")
+    stages.append(imputer)
+
+    # Assemble features
+    assembler = VectorAssembler(inputCols=assembler_cols, outputCol="features_raw", handleInvalid="skip")
+    stages.append(assembler)
+
+    # Scale features
     scaler = StandardScaler(inputCol="features_raw", outputCol="features", withMean=True, withStd=True)
+    stages.append(scaler)
 
+    # Add estimator
     if model_type == "RF":
-        estimator = RandomForestRegressor(featuresCol="features", labelCol=label_col, predictionCol="prediction")
+        estimator = RandomForestRegressor(featuresCol="features", labelCol=label_col,
+                                         predictionCol="prediction", seed=42)
     elif model_type == "GBT":
-        estimator = GBTRegressor(featuresCol="features", labelCol=label_col, predictionCol="prediction")
+        estimator = GBTRegressor(featuresCol="features", labelCol=label_col,
+                                predictionCol="prediction", seed=42)
     else:
         raise ValueError("Unsupported model type. Choose 'RF' or 'GBT'.")
-    
-    pipeline = Pipeline(stages=[imputer, assembler, scaler, estimator])
+
+    stages.append(estimator)
+    pipeline = Pipeline(stages=stages)
+
     return pipeline, estimator
 
 # ---- Hyperparameter Tuning -----
@@ -442,100 +574,138 @@ def score_live_with_object(spark, model_pipeline, live_weather_token: List[float
 
 # ----- MAIN!!!!! -----
 
-def main(): 
-    
-    USE_MOCK_DATA = True  # Set to False to use Hive data
+def main():
+
+    USE_MOCK_DATA = CONFIG["USE_MOCK_DATA"]  # Use from CONFIG
+
+    print("\n" + "="*70)
+    print("ENERGY PREDICTION MODEL TRAINING")
+    print("="*70)
+    print(f"Mode: {'MOCK DATA (testing)' if USE_MOCK_DATA else 'REAL ML DATASET'}")
 
     spark = create_spark_session()
-    
+
     try:
+        # Load data
         df = load_hive_data(spark, use_mock=USE_MOCK_DATA)
-        print("Loaded rows:", df.count())
-        df_features, feature_cols = prepare_features(df)
-        print("Prepared features. Example columns:", feature_cols[:5])
+        print(f"\n✓ Loaded {df.count():,} total rows")
 
-        train, val, test, p1, p2 = time_based_split(df_features)
-        print(f"Split epochs: split1={p1}, split2={p2}")
-        print("Counts -> train:", train.count(), "val:", val.count(), "test:", test.count())
+        # Prepare features
+        df_features, feature_cols = prepare_features(df, use_mock=USE_MOCK_DATA)
 
-        evaluator = RegressionEvaluator(labelCol="price", predictionCol="prediction", metricName="rmse")
+        # Split data
+        train, val, test, p1, p2 = time_based_split(df_features, use_mock=USE_MOCK_DATA)
 
+        if USE_MOCK_DATA:
+            print(f"\nSplit epochs: split1={p1}, split2={p2}")
 
-        # Random Forest Pipeline 
-        rf_pipeline, rf_estimator = build_pipeline(feature_cols, model_type="RF")
-        rf_param_grid = ParamGridBuilder() \
-            .addGrid(rf_estimator.numTrees, CONFIG["RF"]["numTrees"]) \
-            .addGrid(rf_estimator.maxDepth, CONFIG["RF"]["maxDepth"]) \
+        train_count = train.count()
+        val_count = val.count()
+        test_count = test.count()
+        print(f"\nData splits:")
+        print(f"  Train: {train_count:,} records")
+        print(f"  Val:   {val_count:,} records")
+        print(f"  Test:  {test_count:,} records")
+
+        # Train production and consumption models
+        print("\n" + "="*70)
+        print("TRAINING PRODUCTION MODEL")
+        print("="*70)
+
+        prod_pipeline, prod_estimator = build_pipeline(
+            feature_cols,
+            label_col=CONFIG["PRODUCTION_TARGET"],
+            model_type="RF",
+            include_categorical=True
+        )
+
+        prod_param_grid = ParamGridBuilder() \
+            .addGrid(prod_estimator.numTrees, CONFIG["RF"]["numTrees"]) \
+            .addGrid(prod_estimator.maxDepth, CONFIG["RF"]["maxDepth"]) \
             .build()
-        
-        rf_tvs_model = time_aware_train_val(rf_pipeline, rf_estimator, train, val, rf_param_grid, evaluator, parallelism=2)
-        rf_metrics = evaluate_model(rf_tvs_model.bestModel, test, evaluator)
 
-        print("Random Forest Test Metrics:", rf_metrics)
+        prod_evaluator = RegressionEvaluator(
+            labelCol=CONFIG["PRODUCTION_TARGET"],
+            predictionCol="prediction",
+            metricName="rmse"
+        )
 
-        # GBT Pipeline
-        gbt_pipeline, gbt_estimator = build_pipeline(feature_cols, model_type="GBT")
-        gbt_param_grid = ParamGridBuilder() \
-            .addGrid(gbt_estimator.maxIter, CONFIG["GBT"]["maxIter"]) \
-            .addGrid(gbt_estimator.maxDepth, CONFIG["GBT"]["maxDepth"]) \
-            .build()
-        
-        gbt_tvs_model = time_aware_train_val(gbt_pipeline, gbt_estimator, train, val, gbt_param_grid, evaluator, parallelism=2)
-        gbt_metrics = evaluate_model(gbt_tvs_model.bestModel, test, evaluator)
-        print("GBT Test Metrics:", gbt_metrics)
+        print(f"\nTraining with {len(prod_param_grid)} hyperparameter combinations...")
+        prod_tvs_model = time_aware_train_val(prod_pipeline, prod_estimator, train, val,
+                                               prod_param_grid, prod_evaluator, parallelism=2)
 
-        # Pick best model by RMSE
-        best_model = None
-        best_metrics = None
-        best_type = None
+        prod_metrics = evaluate_model(prod_tvs_model.bestModel, test, prod_evaluator)
+        print(f"\n✓ Production Model Test Metrics: {prod_metrics}")
 
-        if rf_metrics["RMSE"] <= gbt_metrics["RMSE"]:
-            best_model = rf_tvs_model.bestModel
-            best_metrics = rf_metrics
-            best_type = "RF"
-        else:
-            best_model = gbt_tvs_model.bestModel
-            best_metrics = gbt_metrics
-            best_type = "GBT"
-
-        print(f"Best Selceted model type: {best_type} with RMSE={best_metrics['RMSE']:.4f}")
-
-        # Save model and metadata
-        metadata = {
+        # Save production model
+        prod_metadata = {
             "created_at": now_tag(),
-            "model_type": best_type,
-            "test_metrics": best_metrics,
+            "target": CONFIG["PRODUCTION_TARGET"],
+            "model_type": "RandomForest",
+            "features": feature_cols,
+            "categorical_features": CONFIG["CATEGORICAL_FEATURES"],
+            "test_metrics": prod_metrics,
             "config": CONFIG
         }
+        prod_model_path = save_model_and_metadata(
+            prod_tvs_model.bestModel,
+            prod_metadata,
+            CONFIG["MODEL_OUTPUT_PATH"],
+            f"{CONFIG['MODEL_NAME']}_production"
+        )
 
-        model_path = save_model_and_metadata(best_model, metadata, CONFIG["MODEL_OUTPUT_PATH"], CONFIG["MODEL_NAME"])
+        print("\n" + "="*70)
+        print("TRAINING CONSUMPTION MODEL")
+        print("="*70)
 
-        # Demo scoring
-        sample_zone = CONFIG["SAMPLE_ZONE"]
-        if sample_zone is None:
-            sample_zone = df.select("zone").orderBy(F.col("ts").desc()).limit(1).collect()[0]["zone"]
+        cons_pipeline, cons_estimator = build_pipeline(
+            feature_cols,
+            label_col=CONFIG["CONSUMPTION_TARGET"],
+            model_type="RF",
+            include_categorical=True
+        )
 
-        print("Demo scoring for zone:", sample_zone)
+        cons_param_grid = ParamGridBuilder() \
+            .addGrid(cons_estimator.numTrees, CONFIG["RF"]["numTrees"]) \
+            .addGrid(cons_estimator.maxDepth, CONFIG["RF"]["maxDepth"]) \
+            .build()
 
-        # --- FIX STARTS HERE ---
-        # 1. Choose the correct table name based on Mock vs Real data
-        if USE_MOCK_DATA:
-            query_table = CONFIG["HIVE_TABLE"]  # Query 'sample_table'
-        else:
-            query_table = f"{CONFIG['HIVE_DB']}.{CONFIG['HIVE_TABLE']}" # Query 'default.sample_table'
+        cons_evaluator = RegressionEvaluator(
+            labelCol=CONFIG["CONSUMPTION_TARGET"],
+            predictionCol="prediction",
+            metricName="rmse"
+        )
 
-        latest_row = spark.sql(f"SELECT * FROM {query_table} WHERE zone = '{sample_zone}' ORDER BY ts DESC LIMIT 1").collect()
-        
-        if latest_row:
-            live_token = latest_row[0]["token"]
-            
-            # 2. Use 'score_live_with_object' instead of 'score_live_weather'
-            # (Because score_live_weather is empty/commented out in your file)
-            pred_df = score_live_with_object(spark, best_model, live_token, zone=sample_zone, use_mock=USE_MOCK_DATA)
-            
-            print("Live weather token prediction:\n", pred_df)
-        else:
-            print("No data found for demo scoring.")
+        print(f"\nTraining with {len(cons_param_grid)} hyperparameter combinations...")
+        cons_tvs_model = time_aware_train_val(cons_pipeline, cons_estimator, train, val,
+                                               cons_param_grid, cons_evaluator, parallelism=2)
+
+        cons_metrics = evaluate_model(cons_tvs_model.bestModel, test, cons_evaluator)
+        print(f"\n✓ Consumption Model Test Metrics: {cons_metrics}")
+
+        # Save consumption model
+        cons_metadata = {
+            "created_at": now_tag(),
+            "target": CONFIG["CONSUMPTION_TARGET"],
+            "model_type": "RandomForest",
+            "features": feature_cols,
+            "categorical_features": CONFIG["CATEGORICAL_FEATURES"],
+            "test_metrics": cons_metrics,
+            "config": CONFIG
+        }
+        cons_model_path = save_model_and_metadata(
+            cons_tvs_model.bestModel,
+            cons_metadata,
+            CONFIG["MODEL_OUTPUT_PATH"],
+            f"{CONFIG['MODEL_NAME']}_consumption"
+        )
+
+        print("\n" + "="*70)
+        print("TRAINING COMPLETE")
+        print("="*70)
+        print(f"✓ Production model: {prod_model_path}")
+        print(f"✓ Consumption model: {cons_model_path}")
+        print(f"\n✓ Models ready for prediction!")
 
     finally:
         spark.stop()
