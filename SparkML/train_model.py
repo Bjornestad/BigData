@@ -116,6 +116,9 @@ def create_spark_session():
         .config("spark.sql.connect.enabled", "false") \
         .config("spark.sql.connect.server.enabled", "false") \
         .config("spark.sql.shuffle.partitions", 8) \
+        .config("spark.sql.parquet.int96RebaseModeInWrite", "CORRECTED") \
+        .config("spark.sql.parquet.datetimeRebaseModeInWrite", "CORRECTED") \
+        .config("spark.sql.parquet.enableVectorizedReader", "false") \
         .master(CONFIG["SPARK_MASTER"])
 
     # Add Hive support if metastore URI is configured
@@ -211,30 +214,89 @@ def load_hive_data(spark, use_mock=False):
         df.createOrReplaceTempView(CONFIG["HIVE_TABLE"])
         return df
     else:
-        db = CONFIG["HIVE_DB"]
-        table = CONFIG["HIVE_TABLE"]
+        # Read from Hive ml_training_data view
+        print("Loading ML dataset from Hive ml_training_data view...")
 
-        # Try loading from Hive table first
+        # Ensure we're using the default database
+        spark.sql("USE default")
+
+        # Check if table exists
+        tables = spark.sql("SHOW TABLES").collect()
+        print(f"  Available tables: {[row.tableName for row in tables]}")
+
+        # Try to read the view
         try:
-            print(f"Loading ML dataset from Hive table: {db}.{table}")
-            df = spark.table(f"{db}.{table}")
-            print(f"Loaded {df.count()} rows from Hive table")
+            df = spark.sql("SELECT * FROM default.ml_training_data")
+            row_count = df.count()
+            print(f"  ✓ Loaded ML dataset with {row_count:,} rows from Hive view")
             return df
         except Exception as e:
-            print(f"Could not load from Hive table: {e}")
-            print("Attempting to run ml_dataset_simple.sql query instead...")
+            print(f"  ✗ Failed to read from Hive view: {e}")
+            print(f"  Falling back to direct Parquet read...")
 
-            # If table doesn't exist, try running the query directly
-            sql_file = "../ml_dataset_simple.sql"
-            try:
-                with open(sql_file, 'r') as f:
-                    query = f.read()
-                df = spark.sql(query)
-                print(f"Loaded {df.count()} rows from SQL query")
-                return df
-            except Exception as e2:
-                print(f"Failed to run SQL query: {e2}")
-                raise RuntimeError(f"Could not load ML dataset from Hive table or SQL file")
+            # Fallback: read directly from HDFS
+            weather_df = spark.read.parquet("hdfs://namenode:9000/user/hive/warehouse/weather_wind_solar_area_hourly")
+            production_df = spark.read.parquet("hdfs://namenode:9000/user/hive/warehouse/energy_by_municipality")
+            consumption_df = spark.read.parquet("hdfs://namenode:9000/user/hive/warehouse/consumption_coverage_location")
+
+            # Register as temp views
+            weather_df.createOrReplaceTempView("weather")
+            production_df.createOrReplaceTempView("production")
+            consumption_df.createOrReplaceTempView("consumption")
+
+            # Join manually
+            df = spark.sql("""
+                SELECT
+                  w.year, w.month, w.day, w.hour, w.dk_area,
+                  w.month as month_of_year,
+                  w.hour as hour_of_day,
+                  w.wind_speed_mean_area as wind_speed_avg,
+                  w.wind_speed_max_area as wind_speed_max,
+                  w.wind_dir_sin_area as wind_direction_sin,
+                  w.wind_dir_cos_area as wind_direction_cos,
+                  w.radia_glob_past1h_area as solar_radiation_1h,
+                  w.sun_last1h_glob_area as sunshine_duration_1h,
+                  w.cloud_cover_mean_area as cloud_cover_avg,
+                  w.n_stations_wind,
+                  w.n_stations_solar,
+                  p.total_production_mwh,
+                  c.total_consumption_mwh
+                FROM weather w
+                LEFT JOIN (
+                  SELECT
+                    CASE WHEN CAST(MunicipalityNo AS INT) < 400 THEN 'DK1' ELSE 'DK2' END as dk_area,
+                    year, month, day, hour,
+                    SUM(
+                      COALESCE(SolarMWh, 0) +
+                      COALESCE(OffshoreWindLt100MW_MWh, 0) +
+                      COALESCE(OffshoreWindGe100MW_MWh, 0) +
+                      COALESCE(OnshoreWindMWh, 0) +
+                      COALESCE(ThermalPowerMWh, 0)
+                    ) as total_production_mwh
+                  FROM production
+                  GROUP BY
+                    CASE WHEN CAST(MunicipalityNo AS INT) < 400 THEN 'DK1' ELSE 'DK2' END,
+                    year, month, day, hour
+                ) p ON w.dk_area = p.dk_area
+                   AND w.year = p.year
+                   AND w.month = p.month
+                   AND w.day = p.day
+                   AND w.hour = p.hour
+                LEFT JOIN (
+                  SELECT PriceArea as dk_area, year, month, day, hour,
+                         SUM(ShareMWh) as total_consumption_mwh
+                  FROM consumption
+                  GROUP BY PriceArea, year, month, day, hour
+                ) c ON w.dk_area = c.dk_area
+                   AND w.year = c.year
+                   AND w.month = c.month
+                   AND w.day = c.day
+                   AND w.hour = c.hour
+            """)
+
+            row_count = df.count()
+            print(f"  ✓ Fallback successful: {row_count:,} rows")
+            return df
 
 
 #----- Feature Engineering -----
@@ -469,8 +531,12 @@ def time_aware_train_val(pipeline, estimator, train_df, val_df, parm_grid, evalu
 def evaluate_model(model_pipeline, df, evaluator):
     predictions = model_pipeline.transform(df)
     rmse = evaluator.evaluate(predictions)
-    mae = RegressionEvaluator(labelCol="price", predictionCol="prediction", metricName="mae").evaluate(predictions)
-    r2 = RegressionEvaluator(labelCol="price", predictionCol="prediction", metricName="r2").evaluate(predictions)
+
+    # Get the label column from the evaluator
+    label_col = evaluator.getLabelCol()
+
+    mae = RegressionEvaluator(labelCol=label_col, predictionCol="prediction", metricName="mae").evaluate(predictions)
+    r2 = RegressionEvaluator(labelCol=label_col, predictionCol="prediction", metricName="r2").evaluate(predictions)
 
     return {"RMSE": rmse, "MAE": mae, "R2": r2}
 

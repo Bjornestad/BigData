@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: realtime-weather-fetcher
+  namespace: bd-bd-gr-08
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: realtime-weather-fetcher
+  template:
+    metadata:
+      labels:
+        app: realtime-weather-fetcher
+    spec:
+      containers:
+      - name: fetcher
+        image: python:3.11-slim
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "Installing dependencies..."
+            pip install -q --no-cache-dir requests pandas numpy kafka-python
+
+            echo "Starting real-time weather fetcher..."
+            cd /app/scripts
+            python3 fetch_realtime_weather.py
+        env:
+        - name: DMI_API_KEY
+          value: "b5800a05-4f0f-4584-b130-6129213728c0"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-bootstrap:9092"
+        - name: KAFKA_TOPIC
+          value: "weather_hourly_ml"
+        - name: FETCH_INTERVAL
+          value: "3600"  # 1 hour
+        volumeMounts:
+        - name: code
+          mountPath: /app
+      volumes:
+      - name: code
+        persistentVolumeClaim:
+          claimName: weather-data-pvc
+      restartPolicy: Always

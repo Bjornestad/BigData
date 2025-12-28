@@ -1,0 +1,149 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: setup-hdfs-sinks
+  namespace: bd-bd-gr-08
+spec:
+  template:
+    spec:
+      containers:
+      - name: setup
+        image: curlimages/curl:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -e
+            echo "Setting up Kafka Connect HDFS sinks for real-time data..."
+
+            CONNECT_URL="http://kafka-connect:8083"
+
+            # Wait for Kafka Connect to be ready
+            echo "Waiting for Kafka Connect..."
+            until curl -s $CONNECT_URL/connectors > /dev/null 2>&1; do
+              echo "  Kafka Connect not ready, waiting..."
+              sleep 5
+            done
+            echo "✓ Kafka Connect is ready"
+
+            # Delete existing connectors if they exist
+            echo ""
+            echo "Cleaning up old connectors..."
+            for connector in hdfs-sink-weather-ml hdfs-sink-energy-actual hdfs-sink-energy-predictions; do
+              if curl -s $CONNECT_URL/connectors | grep -q "\"$connector\""; then
+                echo "  Deleting $connector..."
+                curl -X DELETE $CONNECT_URL/connectors/$connector
+              fi
+            done
+
+            echo ""
+            echo "================================================================"
+            echo "CREATING HDFS SINK #1: weather_hourly_ml"
+            echo "================================================================"
+
+            curl -X POST $CONNECT_URL/connectors \
+              -H "Content-Type: application/json" \
+              -d '{
+              "name": "hdfs-sink-weather-ml",
+              "config": {
+                "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
+                "tasks.max": "1",
+                "topics": "weather_hourly_ml",
+                "hdfs.url": "hdfs://namenode:9000",
+                "topics.dir": "/user/hive/warehouse/weather_wind_solar_area_hourly",
+                "flush.size": "10",
+                "rotate.interval.ms": "60000",
+                "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
+                "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
+                "schema.compatibility": "NONE",
+                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "value.converter.schemas.enable": "false",
+                "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+                "errors.tolerance": "all",
+                "errors.log.enable": "true"
+              }
+            }'
+
+            echo ""
+            echo ""
+            echo "================================================================"
+            echo "CREATING HDFS SINK #2: energy_actual"
+            echo "================================================================"
+
+            curl -X POST $CONNECT_URL/connectors \
+              -H "Content-Type: application/json" \
+              -d '{
+              "name": "hdfs-sink-energy-actual",
+              "config": {
+                "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
+                "tasks.max": "1",
+                "topics": "energy_actual",
+                "hdfs.url": "hdfs://namenode:9000",
+                "topics.dir": "/user/hive/warehouse/energy_actual_realtime",
+                "flush.size": "10",
+                "rotate.interval.ms": "60000",
+                "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
+                "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
+                "schema.compatibility": "NONE",
+                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "value.converter.schemas.enable": "false",
+                "key.converter": "org.apache.kafka.connect.storage.StringConverter"
+              }
+            }'
+
+            echo ""
+            echo ""
+            echo "================================================================"
+            echo "CREATING HDFS SINK #3: energy_predictions"
+            echo "================================================================"
+
+            curl -X POST $CONNECT_URL/connectors \
+              -H "Content-Type: application/json" \
+              -d '{
+              "name": "hdfs-sink-energy-predictions",
+              "config": {
+                "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
+                "tasks.max": "1",
+                "topics": "energy_predictions",
+                "hdfs.url": "hdfs://namenode:9000",
+                "topics.dir": "/user/hive/warehouse/energy_predictions_realtime",
+                "flush.size": "10",
+                "rotate.interval.ms": "60000",
+                "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
+                "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
+                "schema.compatibility": "NONE",
+                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "value.converter.schemas.enable": "false",
+                "key.converter": "org.apache.kafka.connect.storage.StringConverter"
+              }
+            }'
+
+            echo ""
+            echo ""
+            echo "================================================================"
+            echo "VERIFYING CONNECTORS"
+            echo "================================================================"
+
+            sleep 5
+
+            echo ""
+            echo "Active connectors:"
+            curl -s $CONNECT_URL/connectors | jq .
+
+            echo ""
+            echo ""
+            for connector in hdfs-sink-weather-ml hdfs-sink-energy-actual hdfs-sink-energy-predictions; do
+              echo "Status of $connector:"
+              curl -s $CONNECT_URL/connectors/$connector/status | jq .
+              echo ""
+            done
+
+            echo ""
+            echo "✓ HDFS sinks configured successfully!"
+            echo ""
+            echo "Data will flow:"
+            echo "  weather_hourly_ml      → /user/hive/warehouse/weather_wind_solar_area_hourly/"
+            echo "  energy_actual          → /user/hive/warehouse/energy_actual_realtime/"
+            echo "  energy_predictions     → /user/hive/warehouse/energy_predictions_realtime/"
+
+      restartPolicy: Never
+  backoffLimit: 2
