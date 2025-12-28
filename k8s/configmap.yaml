@@ -2,10 +2,10 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: backend-config
-  namespace: power-grid-monitor
+  namespace: bd-bd-gr-08
 data:
-  KAFKA_BROKERS: "kafka-service:9092"
-  ACTUAL_TOPIC: "power-consumption-actual"
-  PREDICTED_TOPIC: "power-consumption-predicted"
+  KAFKA_BROKERS: "kafka-bootstrap:9092"
+  ACTUAL_TOPIC: "energy_actual"
+  PREDICTED_TOPIC: "energy_predictions"
   CONSUMER_GROUP: "power-grid-monitor"
   PORT: "8080"

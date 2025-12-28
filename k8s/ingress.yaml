@@ -2,7 +2,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: power-grid-ingress
-  namespace: power-grid-monitor
+  namespace: bd-bd-gr-08
   annotations:
     nginx.ingress.kubernetes.io/rewrite-target: /
     nginx.ingress.kubernetes.io/websocket-services: backend-service

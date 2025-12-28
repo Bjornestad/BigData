@@ -88,42 +88,49 @@ async function setupKafka() {
           const value = JSON.parse(message.value.toString());
           
           if (topic === ACTUAL_TOPIC) {
-            // Expected format: { timestamp: ISO8601, value: number }
+            // Expected format from energy_actual:
+            // { timestamp, dk_area, year, month, day, hour, total_production_mwh, total_consumption_mwh, net_balance_mwh, ... }
             const dataPoint = {
               timestamp: value.timestamp || new Date().toISOString(),
-              value: parseFloat(value.value),
+              value: parseFloat(value.total_consumption_mwh || value.value || 0),
+              production: parseFloat(value.total_production_mwh || 0),
+              dk_area: value.dk_area,
               type: 'actual'
             };
-            
+
             actualData.push(dataPoint);
             if (actualData.length > MAX_DATA_POINTS) {
               actualData.shift();
             }
-            
+
             broadcast({
               type: 'actual',
               data: dataPoint
             });
-            
+
             console.log('Actual:', dataPoint);
           } else if (topic === PREDICTED_TOPIC) {
-            // Expected format: { timestamp: ISO8601, value: number }
+            // Expected format from energy_predictions:
+            // { timestamp, dk_area, year, month, day, hour, predictions: { production_mwh, consumption_mwh, net_balance_mwh } }
             const dataPoint = {
               timestamp: value.timestamp || new Date().toISOString(),
-              value: parseFloat(value.value),
+              value: parseFloat(value.predictions?.consumption_mwh || value.value || 0),
+              production: parseFloat(value.predictions?.production_mwh || 0),
+              net_balance: parseFloat(value.predictions?.net_balance_mwh || 0),
+              dk_area: value.dk_area,
               type: 'predicted'
             };
-            
+
             predictedData.push(dataPoint);
             if (predictedData.length > MAX_DATA_POINTS) {
               predictedData.shift();
             }
-            
+
             broadcast({
               type: 'predicted',
               data: dataPoint
             });
-            
+
             console.log('Predicted:', dataPoint);
           }
         } catch (error) {
