@@ -23,7 +23,7 @@ spec:
             - |
               echo "Writing manual configuration..."
               echo "listeners=http://0.0.0.0:8081" > /etc/schema-registry/schema-registry.properties
-              echo "kafkastore.bootstrap.servers=PLAINTEXT://energy-stack-energy-cluster:9092" >> /etc/schema-registry/schema-registry.properties
+              echo "kafkastore.bootstrap.servers=PLAINTEXT://energy-platform-energy-cluster:9092" >> /etc/schema-registry/schema-registry.properties
 
               echo "kafkastore.topic.replication.factor=3" >> /etc/schema-registry/schema-registry.properties
               echo "kafkastore.topic=_schemas" >> /etc/schema-registry/schema-registry.properties

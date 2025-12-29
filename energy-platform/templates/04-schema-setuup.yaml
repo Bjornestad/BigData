@@ -101,7 +101,7 @@ spec:
               SCHEMA_JSON=$(cat /config/weather_station.avsc | sed 's/"/\\"/g' | tr -d '\n' | tr -d ' ')
               curl -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
                    --data "{\"schema\": \"$SCHEMA_JSON\"}" \
-                   http://schema-registry:8081/subjects/weather-live-ingest-value/versions
+                   http://schema-registry:8081/subjects/weather-data-value/versions
               
               echo "\n2. Registering Energy Prediction Output Schema..."
               SCHEMA_JSON_PRED=$(cat /config/energy_prediction.avsc | sed 's/"/\\"/g' | tr -d '\n' | tr -d ' ')

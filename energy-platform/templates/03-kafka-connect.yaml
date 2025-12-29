@@ -42,7 +42,7 @@ spec:
             - containerPort: 8083
           env:
             - name: CONNECT_BOOTSTRAP_SERVERS
-              value: "energy-stack-energy-cluster:9092"
+              value: "energy-platform-energy-cluster:9092"
             - name: CONNECT_REST_PORT
               value: "8083"
             - name: CONNECT_GROUP_ID
@@ -74,9 +74,14 @@ spec:
           volumeMounts:
             - name: plugins-vol
               mountPath: /plugins
+            - name: shared-data
+              mountPath: /data
       volumes:
         - name: plugins-vol
           emptyDir: {}
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: weather-data-pvc
 ---
 apiVersion: v1
 kind: Service

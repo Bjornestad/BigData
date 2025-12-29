@@ -1,0 +1,162 @@
+import os
+import time
+import json
+import pandas as pd
+from kafka import KafkaProducer
+from datetime import datetime
+
+# Configuration
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+DATA_DIR = os.getenv("DATA_DIR", "/data")
+WEATHER_TOPIC = "weather-data"
+ENERGY_TOPIC = "energy-data"
+
+# Wait settings
+MAX_WAIT_MINUTES = 20
+CHECK_INTERVAL_SECONDS = 30
+
+def wait_for_data():
+    """Wait until data files appear in the data directory."""
+    print(f"Waiting for data in {DATA_DIR}...")
+    start_time = time.time()
+    
+    while True:
+        # Check for files
+        if os.path.exists(DATA_DIR):
+            files = os.listdir(DATA_DIR)
+            weather_files = [f for f in files if f.startswith("dmi_weather_") and f.endswith(".parquet")]
+            energy_files = [f for f in files if f.startswith("energy_production_") and f.endswith(".parquet")]
+            
+            # We expect at least one file of each type (or just weather if energy failed, etc.)
+            # Adjust logic: Wait until we see at least some files.
+            if weather_files or energy_files:
+                print(f"Found {len(weather_files)} weather files and {len(energy_files)} energy files.")
+                
+                # Optional: Wait a bit more to ensure all fetchers are done?
+                # For now, we assume if files are appearing, we can start processing.
+                # A better check would be to wait for a specific 'done' marker file, 
+                # but simply waiting for files is a good start.
+                
+                # Let's wait until we have at least 5 files (since we have 5 years)
+                # or until timeout.
+                total_files = len(weather_files) + len(energy_files)
+                if total_files >= 5: 
+                    print("Sufficient data found. Starting replay.")
+                    return True
+                else:
+                    print(f"Found {total_files} files. Waiting for more...")
+            
+        # Check timeout
+        elapsed = (time.time() - start_time) / 60
+        if elapsed > MAX_WAIT_MINUTES:
+            print(f"Timeout reached ({MAX_WAIT_MINUTES} min). Starting with whatever data we have.")
+            return False
+            
+        time.sleep(CHECK_INTERVAL_SECONDS)
+
+def create_producer():
+    """Create a Kafka producer instance."""
+    try:
+        producer = KafkaProducer(
+            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            retries=5
+        )
+        print(f"Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+        return producer
+    except Exception as e:
+        print(f"Failed to connect to Kafka: {e}")
+        return None
+
+def replay_weather_data(producer):
+    """Replay weather data from Parquet files to Kafka."""
+    print("Replaying weather data...")
+    
+    # Find all weather parquet files
+    files = [f for f in os.listdir(DATA_DIR) if f.startswith("dmi_weather_") and f.endswith(".parquet")]
+    files.sort()
+    
+    if not files:
+        print("No weather data files found.")
+        return
+
+    for file in files:
+        filepath = os.path.join(DATA_DIR, file)
+        print(f"Processing {file}...")
+        
+        try:
+            df = pd.read_parquet(filepath)
+            records = df.to_dict(orient='records')
+            
+            for record in records:
+                # Convert timestamp to string for JSON serialization
+                if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
+                    record['timestamp'] = record['timestamp'].isoformat()
+                if 'date' in record:
+                    record['date'] = str(record['date'])
+                
+                producer.send(WEATHER_TOPIC, record)
+            
+            producer.flush()
+            print(f"Sent {len(records)} weather records from {file}")
+            
+        except Exception as e:
+            print(f"Error processing {file}: {e}")
+
+def replay_energy_data(producer):
+    """Replay energy data from Parquet files to Kafka."""
+    print("Replaying energy data...")
+    
+    # Find all energy parquet files
+    files = [f for f in os.listdir(DATA_DIR) if f.startswith("energy_production_") and f.endswith(".parquet")]
+    files.sort()
+    
+    if not files:
+        print("No energy data files found.")
+        return
+
+    for file in files:
+        filepath = os.path.join(DATA_DIR, file)
+        print(f"Processing {file}...")
+        
+        try:
+            df = pd.read_parquet(filepath)
+            records = df.to_dict(orient='records')
+            
+            for record in records:
+                # Convert timestamp to string for JSON serialization
+                if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
+                    record['timestamp'] = record['timestamp'].isoformat()
+                if 'date' in record:
+                    record['date'] = str(record['date'])
+                
+                producer.send(ENERGY_TOPIC, record)
+            
+            producer.flush()
+            print(f"Sent {len(records)} energy records from {file}")
+            
+        except Exception as e:
+            print(f"Error processing {file}: {e}")
+
+def main():
+    print("Starting replay job...")
+    
+    # Wait for data to be available
+    wait_for_data()
+    
+    # Wait for Kafka to be ready
+    time.sleep(10)
+    
+    producer = create_producer()
+    if not producer:
+        print("Could not create Kafka producer. Exiting.")
+        return
+
+    replay_weather_data(producer)
+    replay_energy_data(producer)
+    
+    producer.close()
+    print("Replay job completed.")
+
+if __name__ == "__main__":
+    main()

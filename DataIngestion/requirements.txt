@@ -1,0 +1,7 @@
+requests
+pandas
+pyarrow
+pyyaml
+kafka-python
+python-dotenv
+tqdm
