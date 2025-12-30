@@ -9,6 +9,7 @@ data:
     import time
     import json
     import pandas as pd
+    import numpy as np
     from kafka import KafkaProducer
     from datetime import datetime
 
@@ -34,18 +35,8 @@ data:
                 weather_files = [f for f in files if f.startswith("dmi_weather_") and f.endswith(".parquet")]
                 energy_files = [f for f in files if f.startswith("energy_production_") and f.endswith(".parquet")]
 
-                # We expect at least one file of each type (or just weather if energy failed, etc.)
-                # Adjust logic: Wait until we see at least some files.
                 if weather_files or energy_files:
                     print(f"Found {len(weather_files)} weather files and {len(energy_files)} energy files.")
-
-                    # Optional: Wait a bit more to ensure all fetchers are done?
-                    # For now, we assume if files are appearing, we can start processing.
-                    # A better check would be to wait for a specific 'done' marker file,
-                    # but simply waiting for files is a good start.
-
-                    # Let's wait until we have at least 5 files (since we have 5 years)
-                    # or until timeout.
                     total_files = len(weather_files) + len(energy_files)
                     if total_files >= 5:
                         print("Sufficient data found. Starting replay.")
@@ -53,7 +44,6 @@ data:
                     else:
                         print(f"Found {total_files} files. Waiting for more...")
 
-            # Check timeout
             elapsed = (time.time() - start_time) / 60
             if elapsed > MAX_WAIT_MINUTES:
                 print(f"Timeout reached ({MAX_WAIT_MINUTES} min). Starting with whatever data we have.")
@@ -75,11 +65,20 @@ data:
             print(f"Failed to connect to Kafka: {e}")
             return None
 
+    def clean_record(record):
+        """Replace NaN/Infinity with None for JSON compliance."""
+        cleaned = {}
+        for k, v in record.items():
+            if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                cleaned[k] = None
+            else:
+                cleaned[k] = v
+        return cleaned
+
     def replay_weather_data(producer):
         """Replay weather data from Parquet files to Kafka."""
         print("Replaying weather data...")
 
-        # Find all weather parquet files
         files = [f for f in os.listdir(DATA_DIR) if f.startswith("dmi_weather_") and f.endswith(".parquet")]
         files.sort()
 
@@ -95,8 +94,12 @@ data:
                 df = pd.read_parquet(filepath)
                 records = df.to_dict(orient='records')
 
+                # DEBUG: Print first record keys
+                if records:
+                    print(f"DEBUG: Weather record keys: {list(records[0].keys())}")
+
                 for record in records:
-                    # Convert timestamp to string for JSON serialization
+                    record = clean_record(record)
                     if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
                         record['timestamp'] = record['timestamp'].isoformat()
                     if 'date' in record:
@@ -114,7 +117,6 @@ data:
         """Replay energy data from Parquet files to Kafka."""
         print("Replaying energy data...")
 
-        # Find all energy parquet files
         files = [f for f in os.listdir(DATA_DIR) if f.startswith("energy_production_") and f.endswith(".parquet")]
         files.sort()
 
@@ -130,8 +132,34 @@ data:
                 df = pd.read_parquet(filepath)
                 records = df.to_dict(orient='records')
 
+                # DEBUG: Print first record keys
+                if records:
+                    print(f"DEBUG: Energy record keys: {list(records[0].keys())}")
+
                 for record in records:
-                    # Convert timestamp to string for JSON serialization
+                    record = clean_record(record)
+
+                    # 1. Map Area: Use MunicipalityNo if dk_area is missing
+                    if 'dk_area' not in record:
+                        if 'PriceArea' in record:
+                            record['dk_area'] = record['PriceArea']
+                        elif 'MunicipalityNo' in record:
+                            record['dk_area'] = record['MunicipalityNo']
+
+                    # 2. Calculate Total Production (Transformation)
+                    if 'total_production_mwh' not in record:
+                        prod = 0.0
+                        # Sum known production columns
+                        for col in ['SolarMWh', 'OnshoreWindMWh', 'OffshoreWindLt100MW_MWh', 'OffshoreWindGe100MW_MWh', 'ThermalPowerMWh']:
+                            if col in record and record[col] is not None:
+                                prod += float(record[col])
+                        record['total_production_mwh'] = prod
+
+                    # 3. Map Consumption
+                    if 'total_consumption_mwh' not in record:
+                        if 'GrossConsumptionMWh' in record:
+                            record['total_consumption_mwh'] = record['GrossConsumptionMWh']
+
                     if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
                         record['timestamp'] = record['timestamp'].isoformat()
                     if 'date' in record:
@@ -147,21 +175,13 @@ data:
 
     def main():
         print("Starting replay job...")
-
-        # Wait for data to be available
         wait_for_data()
-
-        # Wait for Kafka to be ready
         time.sleep(10)
-
         producer = create_producer()
         if not producer:
-            print("Could not create Kafka producer. Exiting.")
             return
-
         replay_weather_data(producer)
         replay_energy_data(producer)
-
         producer.close()
         print("Replay job completed.")
 

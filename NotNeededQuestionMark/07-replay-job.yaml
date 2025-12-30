@@ -3,6 +3,9 @@ kind: Job
 metadata:
   name: replay-history
   namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": "pre-install,pre-upgrade"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
 spec:
   template:
     spec:

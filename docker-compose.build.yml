@@ -18,3 +18,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.fetcher
+
+  kafka-connect:
+    image: dummystad/bigdata:kafka-connect-latest
+    build:
+      context: ./Docker/kafka-connect
+      dockerfile: Dockerfile
+
+  prediction-service:
+    image: dummystad/bigdata:prediction-service-latest
+    build:
+      context: ./Docker/prediction-service
+      dockerfile: Dockerfile

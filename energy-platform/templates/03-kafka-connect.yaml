@@ -12,39 +12,10 @@ spec:
       labels:
         app: kafka-connect
     spec:
-      initContainers:
-        - name: download-plugins
-          image: public.ecr.aws/bitnami/os-shell:12
-          securityContext:
-            runAsUser: 0
-          command:
-            - /bin/bash
-            - -c
-            - |
-              # Create directories
-              mkdir -p /plugins/kafka-connect-jdbc/lib
-              mkdir -p /plugins/kafka-connect-hdfs/lib
-
-              echo "Downloading JDBC Plugin..."
-              curl -L -o /tmp/jdbc.zip https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-jdbc/versions/10.7.4/confluentinc-kafka-connect-jdbc-10.7.4.zip
-              unzip -q /tmp/jdbc.zip -d /tmp/jdbc_extracted
-              find /tmp/jdbc_extracted -name "*.jar" -exec cp {} /plugins/kafka-connect-jdbc/lib/ \;
-
-              echo "Downloading HDFS Plugin..."
-              curl -L -o /tmp/hdfs.zip https://d1i4a15mxbxib1.cloudfront.net/api/plugins/confluentinc/kafka-connect-hdfs/versions/10.3.3/confluentinc-kafka-connect-hdfs-10.3.3.zip
-              unzip -q /tmp/hdfs.zip -d /tmp/hdfs_extracted
-              find /tmp/hdfs_extracted -name "*.jar" -exec cp {} /plugins/kafka-connect-hdfs/lib/ \;
-
-              echo "Fixing permissions..."
-              chown -R 1000:1000 /plugins
-
-              echo "Done!"
-          volumeMounts:
-            - name: plugins-vol
-              mountPath: /plugins
       containers:
         - name: kafka-connect
-          image: confluentinc/cp-kafka-connect:7.5.0
+          image: dummystad/bigdata:kafka-connect-latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8083
           env:
@@ -68,7 +39,7 @@ spec:
               value: "io.confluent.connect.avro.AvroConverter"
             - name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL
               value: "http://schema-registry:8081"
-            # EXPLICITLY list the plugin directories
+            # Point to the baked-in plugin paths
             - name: CONNECT_PLUGIN_PATH
               value: "/plugins/kafka-connect-hdfs,/plugins/kafka-connect-jdbc,/usr/share/java,/usr/share/confluent-hub-components"
             - name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR
@@ -78,13 +49,9 @@ spec:
             - name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR
               value: "3"
           volumeMounts:
-            - name: plugins-vol
-              mountPath: /plugins
             - name: shared-data
               mountPath: /data
       volumes:
-        - name: plugins-vol
-          emptyDir: {}
         - name: shared-data
           persistentVolumeClaim:
             claimName: weather-data-pvc

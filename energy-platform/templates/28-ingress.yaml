@@ -11,7 +11,7 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-  - host: power-grid-monitor.local  # Change this to your domain
+  - host: power-grid-monitor.local
     http:
       paths:
       - path: /

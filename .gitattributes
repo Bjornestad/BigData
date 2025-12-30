@@ -1,0 +1,2 @@
+Docker/kafka-connect/hdfs.zip filter=lfs diff=lfs merge=lfs -text
+Docker/kafka-connect/jdbc.zip filter=lfs diff=lfs merge=lfs -text

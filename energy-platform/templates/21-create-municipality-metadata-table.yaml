@@ -10,17 +10,34 @@ spec:
       containers:
       - name: hdfs-copier
         image: rtdl/hive-metastore:3.1.2
+        securityContext:
+          runAsUser: 0
         command:
           - /bin/bash
           - -c
           - |
             set -e
 
+            # Install netcat
+            echo "Installing netcat..."
+            if command -v apt-get &> /dev/null; then
+                apt-get update && apt-get install -y netcat
+            elif command -v apk &> /dev/null; then
+                apk add --no-cache netcat-openbsd
+            else
+                echo "Unknown package manager, skipping netcat install (hope it exists!)"
+            fi
+
             export HADOOP_HOME=/opt/hadoop-3.3.1
             export PATH=$HADOOP_HOME/bin:$PATH
 
             echo "Waiting for NameNode to be ready..."
-            sleep 60
+            # Smart wait loop for NameNode
+            until nc -z namenode 9000; do
+              echo "  NameNode (namenode:9000) not ready, waiting..."
+              sleep 5
+            done
+            echo "✓ NameNode is ready"
 
             echo "Configuring HDFS client..."
 
@@ -35,7 +52,11 @@ spec:
             HDFS_CONFIG
 
             echo "Creating HDFS directory..."
-            hdfs dfs -mkdir -p /user/hive/warehouse/municipality_metadata
+            # Retry mkdir in case of SafeMode
+            until hdfs dfs -mkdir -p /user/hive/warehouse/municipality_metadata; do
+              echo "  Failed to mkdir (maybe SafeMode?), retrying in 10s..."
+              sleep 10
+            done
 
             echo "Uploading municipality metadata (99 Danish municipalities with DK areas)..."
 

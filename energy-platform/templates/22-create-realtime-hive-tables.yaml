@@ -20,7 +20,21 @@ spec:
         args:
           - |
             set -e
+
+            # Install netcat for the wait loop
+            echo "Installing netcat..."
+            apt-get update && apt-get install -y netcat-openbsd
+
             echo "Creating Hive external tables for real-time data..."
+
+            # Wait for Hive Metastore
+            echo "Waiting for Hive Metastore..."
+            until nc -z hive-metastore 9083; do
+              echo "  Hive Metastore (hive-metastore:9083) not ready, waiting..."
+              sleep 5
+            done
+            echo "✓ Hive Metastore is ready"
+
             echo "================================================================"
 
             # Download missing Hive HCatalog JAR for JsonSerDe

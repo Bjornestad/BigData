@@ -3,6 +3,7 @@ kind: Job
 metadata:
   name: setup-hdfs-sinks
   namespace: {{ .Release.Namespace }}
+  # Hooks removed to prevent blocking install
 spec:
   template:
     spec:
@@ -86,7 +87,9 @@ spec:
                 "schema.compatibility": "NONE",
                 "value.converter": "org.apache.kafka.connect.json.JsonConverter",
                 "value.converter.schemas.enable": "false",
-                "key.converter": "org.apache.kafka.connect.storage.StringConverter"
+                "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+                "errors.tolerance": "all",
+                "errors.log.enable": "true"
               }
             }'
 
@@ -113,7 +116,9 @@ spec:
                 "schema.compatibility": "NONE",
                 "value.converter": "org.apache.kafka.connect.json.JsonConverter",
                 "value.converter.schemas.enable": "false",
-                "key.converter": "org.apache.kafka.connect.storage.StringConverter"
+                "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+                "errors.tolerance": "all",
+                "errors.log.enable": "true"
               }
             }'
 
