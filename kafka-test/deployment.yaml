@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kafka-test-producer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka-test-producer
+  template:
+    metadata:
+      labels:
+        app: kafka-test-producer
+    spec:
+      containers:
+      - name: kafka-test-producer
+        image: kafka-test-producer:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: KAFKA_BROKERS
+          value: "energy-platform-energy-cluster:9092"
+        - name: ACTUAL_TOPIC
+          value: "energy_actual"
+        - name: PREDICTED_TOPIC
+          value: "energy_predictions"

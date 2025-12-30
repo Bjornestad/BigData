@@ -2,8 +2,8 @@ const { Kafka } = require('kafkajs');
 
 // Configuration
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
-const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'power-consumption-actual';
-const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'power-consumption-predicted';
+const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'energy_actual';
+const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'energy_predictions';
 const INTERVAL_MS = parseInt(process.env.INTERVAL_MS || '2000');
 
 // Initialize Kafka
