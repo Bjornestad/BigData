@@ -14,9 +14,6 @@ WORKDIR /app
 # Copy SparkML code and models
 COPY SparkML /app/SparkML
 
-# FORCE REMOVAL of CRC files to fix checksum errors
-RUN find /app/SparkML -name ".*.crc" -type f -delete
-
 # Set environment variables
 ENV JAVA_HOME="/opt/java/openjdk"
 ENV HADOOP_USER_NAME="root"

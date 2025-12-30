@@ -1,0 +1,115 @@
+{
+  "created_at": "20251230_204615",
+  "target": "total_consumption_mwh",
+  "model_type": "RandomForest",
+  "features": [
+    "HourOfDay",
+    "DayOfWeek",
+    "Month",
+    "is_weekend",
+    "price_lag_1",
+    "price_lag_2",
+    "price_lag_24",
+    "price_roll_mean_3h",
+    "price_roll_std_3h",
+    "price_roll_mean_24h",
+    "price_roll_std_24h",
+    "price_roll_mean_168h",
+    "price_roll_std_168h",
+    "token_0",
+    "token_1",
+    "token_2",
+    "token_3",
+    "token_4",
+    "token_5",
+    "token_6",
+    "token_7"
+  ],
+  "categorical_features": [
+    "dk_area"
+  ],
+  "test_metrics": {
+    "RMSE": 2.436422526809212,
+    "MAE": 2.0272493260947444,
+    "R2": 0.8913227714457648
+  },
+  "config": {
+    "HIVE_DB": "default",
+    "HIVE_TABLE": "ml_training_data",
+    "HIVE_METASTORE_URI": "thrift://hive-metastore:9083",
+    "MODEL_OUTPUT_PATH": "/mnt/c/Users/frede/Documents/Git/BigData/Docker/prediction-service/SparkML/models",
+    "MODEL_NAME": "energy_model",
+    "WEATHER_FEATURES": [
+      "wind_speed_avg",
+      "wind_speed_max",
+      "wind_direction_sin",
+      "wind_direction_cos",
+      "solar_radiation_1h",
+      "sunshine_duration_1h",
+      "cloud_cover_avg",
+      "n_stations_wind",
+      "n_stations_solar"
+    ],
+    "TEMPORAL_FEATURES": [
+      "month_of_year",
+      "hour_of_day"
+    ],
+    "CATEGORICAL_FEATURES": [
+      "dk_area"
+    ],
+    "PRODUCTION_TARGET": "total_production_mwh",
+    "CONSUMPTION_TARGET": "total_consumption_mwh",
+    "TRAIN_START_YEAR": 2021,
+    "TRAIN_END_YEAR": 2024,
+    "VAL_YEAR": 2025,
+    "VAL_MONTHS": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "TEST_YEAR": 2025,
+    "TEST_MONTH": 11,
+    "TOKEN_SIZE": 8,
+    "LAGS": [
+      1,
+      2,
+      24
+    ],
+    "ROLL_WINDOWS_HOURS": [
+      3,
+      24,
+      168
+    ],
+    "RF": {
+      "numTrees": [
+        50,
+        100
+      ],
+      "maxDepth": [
+        6,
+        10
+      ]
+    },
+    "GBT": {
+      "maxIter": [
+        50,
+        100
+      ],
+      "maxDepth": [
+        4,
+        8
+      ]
+    },
+    "SPARK_MASTER": "local[*]",
+    "APP_NAME": "EnergyPredictionML",
+    "SAMPLE_ZONE": null,
+    "USE_MOCK_DATA": true
+  }
+}

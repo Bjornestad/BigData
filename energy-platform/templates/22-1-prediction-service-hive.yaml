@@ -24,10 +24,11 @@ spec:
           value: "{{ .Release.Name }}-energy-cluster:9092"
         - name: OUTPUT_TOPIC
           value: "energy_predictions"
+        # Updated to use generic model names (after renaming locally)
         - name: PRODUCTION_MODEL_PATH
-          value: "/app/SparkML/models/spark_model_20251202_195034"
+          value: "/app/SparkML/models/production_model"
         - name: CONSUMPTION_MODEL_PATH
-          value: "/app/SparkML/models/spark_model_20251202_195034"
+          value: "/app/SparkML/models/consumption_model"
         - name: CHECK_INTERVAL
           value: "300"
         - name: HADOOP_USER_NAME

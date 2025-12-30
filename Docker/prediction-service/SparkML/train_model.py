@@ -13,12 +13,16 @@ from pyspark.ml.regression import RandomForestRegressor, GBTRegressor
 from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.tuning import TrainValidationSplit, ParamGridBuilder
 
+# Control mode with an environment variable. Default to False (real data).
+USE_MOCK_DATA_ENV = os.getenv("USE_MOCK_DATA", "false").lower() == "true"
+
 CONFIG = {
     "HIVE_DB" : "default",
     "HIVE_TABLE" : "ml_training_data",  # ML dataset table
     "HIVE_METASTORE_URI": "thrift://hive-metastore:9083",  # Hive metastore connection
 
-    "MODEL_OUTPUT_PATH" : "./SparkML/models",
+    # Use absolute path based on script location
+    "MODEL_OUTPUT_PATH" : os.path.join(os.path.dirname(__file__), "models"),
     "MODEL_NAME" : "energy_model",
 
     # Weather features (inputs)
@@ -67,7 +71,7 @@ CONFIG = {
     "APP_NAME" : "EnergyPredictionML",
 
     "SAMPLE_ZONE": None,
-    "USE_MOCK_DATA": False,  # Set to True to test with mock data
+    "USE_MOCK_DATA": USE_MOCK_DATA_ENV,
 }
 
 
@@ -164,14 +168,14 @@ def create_spark_session():
 # ---- Mock Data ----
 def create_mock_data(spark, num_rows=1000):
     """
-    Generates a DataFrame with columns: ts, zone, price, token
+    Generates a DataFrame with columns: ts, dk_area, price, token
     to mimic the expected input for testing.
     """
     print(f"--- Generating {num_rows} rows of mock data ---")
     
     data = []
     base_time = datetime.datetime.now() - datetime.timedelta(days=60)
-    zones = ["ZoneA", "ZoneB"]
+    zones = ["DK1", "DK2"]
     
     for i in range(num_rows):
         # Create a linear time sequence with some randomness
@@ -186,14 +190,14 @@ def create_mock_data(spark, num_rows=1000):
         
         data.append(Row(
             ts=row_time,
-            zone=zone,
+            dk_area=zone, # Renamed from 'zone' to 'dk_area'
             price=float(price),
             token=token 
         ))
         
     schema = T.StructType([
         T.StructField("ts", T.TimestampType(), True),
-        T.StructField("zone", T.StringType(), True),
+        T.StructField("dk_area", T.StringType(), True),
         T.StructField("price", T.DoubleType(), True),
         T.StructField("token", T.ArrayType(T.DoubleType()), True)
     ])
@@ -326,7 +330,7 @@ def build_time_feature(df, ts_col="ts"):
     return df
 
 
-def add_lag_and_rolling_features(df, zone_col="zone", epoch_col="Epoch", price_col="price", lags=[1,2], roll_windows=[24]):
+def add_lag_and_rolling_features(df, zone_col="dk_area", epoch_col="Epoch", price_col="price", lags=[1,2], roll_windows=[24]):
     """
     Add lag and rolling window features based on CONFIG settings.
     Add lag features (lag_{h}) and rolling mean features (roll_{window}h)
@@ -358,11 +362,12 @@ def prepare_features(df, use_mock=False):
         df = expand_token(df, token_size=CONFIG["TOKEN_SIZE"])
         df = build_time_feature(df, "ts")
         df = add_lag_and_rolling_features(df,
+                                          zone_col="dk_area", # Updated from 'zone'
                                           epoch_col="Epoch",
                                           lags=CONFIG["LAGS"],
                                           roll_windows=CONFIG["ROLL_WINDOWS_HOURS"])
 
-        feature_cols = ["Demand", "HourOfDay", "DayOfWeek", "Month", "is_weekend"]
+        feature_cols = ["HourOfDay", "DayOfWeek", "Month", "is_weekend"]
 
         for h in CONFIG["LAGS"]:
             feature_cols.append(f"price_lag_{h}")
@@ -375,9 +380,6 @@ def prepare_features(df, use_mock=False):
             feature_cols.append(f"token_{i}")
 
         df = df.filter(F.col("price").isNotNull())
-
-        if "Demand" not in df.columns:
-            if "Demand" in feature_cols: feature_cols.remove("Demand")
 
     else:
         # New ML dataset features (weather + temporal)
@@ -543,8 +545,9 @@ def evaluate_model(model_pipeline, df, evaluator):
 # ---- Save model and the Metadata -----
 
 def save_model_and_metadata(model_pipeline, metadata: dict, base_dir: str, mode_name: str):
-    tag = now_tag()
-    model_path = os.path.join(base_dir, f"{mode_name}_{tag}")
+    # Use fixed names for production/consumption models to avoid renaming
+    # mode_name will be "production_model" or "consumption_model"
+    model_path = os.path.join(base_dir, mode_name)
     metadata_path = os.path.join(model_path, "metadata.json")
 
     model_pipeline.write().overwrite().save(model_path)
@@ -569,7 +572,7 @@ def score_live_with_object(spark, model_pipeline, live_weather_token: List[float
     print(f"Querying recent history from: {query_table} for zone {zone}")
     
     if zone:
-        recent = spark.sql(f"SELECT * FROM {query_table} WHERE zone = '{zone}' ORDER BY ts DESC LIMIT 200")
+        recent = spark.sql(f"SELECT * FROM {query_table} WHERE dk_area = '{zone}' ORDER BY ts DESC LIMIT 200")
     else:
         recent = spark.sql(f"SELECT * FROM {query_table} ORDER BY ts DESC LIMIT 200")
 
@@ -680,7 +683,7 @@ def main():
 
         prod_pipeline, prod_estimator = build_pipeline(
             feature_cols,
-            label_col=CONFIG["PRODUCTION_TARGET"],
+            label_col=CONFIG["PRODUCTION_TARGET"] if not USE_MOCK_DATA else "price", # Use 'price' for mock
             model_type="RF",
             include_categorical=True
         )
@@ -691,7 +694,7 @@ def main():
             .build()
 
         prod_evaluator = RegressionEvaluator(
-            labelCol=CONFIG["PRODUCTION_TARGET"],
+            labelCol=CONFIG["PRODUCTION_TARGET"] if not USE_MOCK_DATA else "price",
             predictionCol="prediction",
             metricName="rmse"
         )
@@ -717,7 +720,7 @@ def main():
             prod_tvs_model.bestModel,
             prod_metadata,
             CONFIG["MODEL_OUTPUT_PATH"],
-            f"{CONFIG['MODEL_NAME']}_production"
+            "production_model"
         )
 
         print("\n" + "="*70)
@@ -726,7 +729,7 @@ def main():
 
         cons_pipeline, cons_estimator = build_pipeline(
             feature_cols,
-            label_col=CONFIG["CONSUMPTION_TARGET"],
+            label_col=CONFIG["CONSUMPTION_TARGET"] if not USE_MOCK_DATA else "price",
             model_type="RF",
             include_categorical=True
         )
@@ -737,7 +740,7 @@ def main():
             .build()
 
         cons_evaluator = RegressionEvaluator(
-            labelCol=CONFIG["CONSUMPTION_TARGET"],
+            labelCol=CONFIG["CONSUMPTION_TARGET"] if not USE_MOCK_DATA else "price",
             predictionCol="prediction",
             metricName="rmse"
         )
@@ -763,7 +766,7 @@ def main():
             cons_tvs_model.bestModel,
             cons_metadata,
             CONFIG["MODEL_OUTPUT_PATH"],
-            f"{CONFIG['MODEL_NAME']}_consumption"
+            "consumption_model"
         )
 
         print("\n" + "="*70)
