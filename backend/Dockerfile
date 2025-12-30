@@ -4,7 +4,8 @@ WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm ci --only=production
+# Changed from 'npm ci' to 'npm install' because package-lock.json might be missing
+RUN npm install --only=production
 
 COPY server.js ./
 

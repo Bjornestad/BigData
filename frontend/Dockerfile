@@ -4,7 +4,8 @@ WORKDIR /app
 
 COPY package*.json ./
 
-RUN npm ci
+# Changed from 'npm ci' to 'npm install' because package-lock.json might be missing
+RUN npm install
 
 COPY public/ ./public/
 COPY src/ ./src/

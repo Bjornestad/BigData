@@ -10,7 +10,7 @@ import sys
 import time
 import json
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
@@ -26,15 +26,16 @@ producer = None
 
 def fetch_production_actual(days_back=3):
     """Fetch actual production data from Energinet (3 days back due to data delay)"""
-    end_time = datetime.utcnow() - timedelta(days=days_back)
+    # Use timezone-aware UTC
+    end_time = datetime.now(timezone.utc) - timedelta(days=days_back)
     start_time = end_time - timedelta(hours=24)
 
     # Production by municipality
-    url = f"{ENERGINET_API_URL}/ProductionConsumptionSettlement"
+    # Changed from ProductionConsumptionSettlement to ProductionMunicipalityHour
+    url = f"{ENERGINET_API_URL}/ProductionMunicipalityHour"
     params = {
         'start': start_time.strftime('%Y-%m-%dT%H:00'),
         'end': end_time.strftime('%Y-%m-%dT%H:00'),
-        'filter': '{"MunicipalityNo":{"$ne":null}}',
         'sort': 'HourUTC DESC',
         'limit': 10000
     }
@@ -55,15 +56,17 @@ def fetch_production_actual(days_back=3):
 
 def fetch_consumption_actual(days_back=3):
     """Fetch actual consumption data from Energinet (3 days back due to data delay)"""
-    end_time = datetime.utcnow() - timedelta(days=days_back)
+    # Use timezone-aware UTC
+    end_time = datetime.now(timezone.utc) - timedelta(days=days_back)
     start_time = end_time - timedelta(hours=24)
 
-    url = f"{ENERGINET_API_URL}/ConsumptionDE35Hour"
+    # Changed from ConsumptionDE35Hour to ConsumptionMunicipalityHour
+    url = f"{ENERGINET_API_URL}/ConsumptionMunicipalityHour"
     params = {
         'start': start_time.strftime('%Y-%m-%dT%H:00'),
         'end': end_time.strftime('%Y-%m-%dT%H:00'),
         'sort': 'HourUTC DESC',
-        'limit': 1000
+        'limit': 10000
     }
 
     try:
@@ -129,16 +132,18 @@ def aggregate_consumption_by_area(df):
     df['day'] = df['HourDK'].dt.day
     df['hour'] = df['HourDK'].dt.hour
 
-    # Consumption is already by price area (DK1/DK2)
-    df['dk_area'] = df['PriceArea']
-    df['ConsumptionMWh'] = pd.to_numeric(df['ConsumptionMWh'], errors='coerce').fillna(0)
+    # Map municipality to DK area (municipality < 400 = DK1, >= 400 = DK2)
+    df['MunicipalityNo'] = pd.to_numeric(df['MunicipalityNo'], errors='coerce')
+    df['dk_area'] = df['MunicipalityNo'].apply(lambda x: 'DK1' if x < 400 else 'DK2')
+    
+    df['ConsumptionkWh'] = pd.to_numeric(df['ConsumptionkWh'], errors='coerce').fillna(0)
+    # Convert kWh to MWh
+    df['total_consumption_mwh'] = df['ConsumptionkWh'] / 1000.0
 
     # Group by area and hour
     grouped = df.groupby(['dk_area', 'year', 'month', 'day', 'hour']).agg({
-        'ConsumptionMWh': 'sum'
+        'total_consumption_mwh': 'sum'
     }).reset_index()
-
-    grouped.rename(columns={'ConsumptionMWh': 'total_consumption_mwh'}, inplace=True)
 
     return grouped.to_dict('records')
 
@@ -182,7 +187,7 @@ def combine_production_consumption(prod_records, cons_records):
         merged[col] = merged[col].astype(int)
 
     # Add timestamp
-    merged['timestamp'] = datetime.utcnow().isoformat()
+    merged['timestamp'] = datetime.now(timezone.utc).isoformat()
 
     # Calculate net balance
     merged['net_balance_mwh'] = merged['total_production_mwh'] - merged['total_consumption_mwh']

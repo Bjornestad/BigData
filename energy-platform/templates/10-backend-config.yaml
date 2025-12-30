@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-config
+  namespace: {{ .Release.Namespace }}
+data:
+  KAFKA_BROKERS: "{{ .Release.Name }}-energy-cluster:9092"
+  ACTUAL_TOPIC: "energy_actual"
+  PREDICTED_TOPIC: "energy_predictions"
+  CONSUMER_GROUP: "power-grid-monitor-v2"
+  PORT: "8080"

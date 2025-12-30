@@ -1,0 +1,231 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dmi-api-config
+data:
+  API_KEY: "b5800a05-4f0f-4584-b130-6129213728c0"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-fetch-2021
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: data-fetch
+        year: "2021"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: fetcher
+          image: dummystad/bigdata:fetcher-latest
+          imagePullPolicy: Always
+          command: ["python", "/app/scripts/fetch_year_worker.py"]
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          env:
+            - name: YEAR
+              value: "2021"
+            - name: DATA_DIR
+              value: "/data"
+            - name: TEST_MODE
+              value: "true"  # Set to "true" for testing (1 day), "false" for full year
+            - name: API_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: dmi-api-config
+                  key: API_KEY
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: weather-data-pvc
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-fetch-2022
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: data-fetch
+        year: "2022"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: fetcher
+          image: dummystad/bigdata:fetcher-latest
+          imagePullPolicy: Always
+          command: ["python", "/app/scripts/fetch_year_worker.py"]
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          env:
+            - name: YEAR
+              value: "2022"
+            - name: DATA_DIR
+              value: "/data"
+            - name: TEST_MODE
+              value: "true"
+            - name: API_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: dmi-api-config
+                  key: API_KEY
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: weather-data-pvc
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-fetch-2023
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: data-fetch
+        year: "2023"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: fetcher
+          image: dummystad/bigdata:fetcher-latest
+          imagePullPolicy: Always
+          command: ["python", "/app/scripts/fetch_year_worker.py"]
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          env:
+            - name: YEAR
+              value: "2023"
+            - name: DATA_DIR
+              value: "/data"
+            - name: TEST_MODE
+              value: "true"
+            - name: API_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: dmi-api-config
+                  key: API_KEY
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: weather-data-pvc
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-fetch-2024
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: data-fetch
+        year: "2024"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: fetcher
+          image: dummystad/bigdata:fetcher-latest
+          imagePullPolicy: Always
+          command: ["python", "/app/scripts/fetch_year_worker.py"]
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          env:
+            - name: YEAR
+              value: "2024"
+            - name: DATA_DIR
+              value: "/data"
+            - name: TEST_MODE
+              value: "true"
+            - name: API_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: dmi-api-config
+                  key: API_KEY
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: weather-data-pvc
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-fetch-2025
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: data-fetch
+        year: "2025"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: fetcher
+          image: dummystad/bigdata:fetcher-latest
+          imagePullPolicy: Always
+          command: ["python", "/app/scripts/fetch_year_worker.py"]
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          env:
+            - name: YEAR
+              value: "2025"
+            - name: DATA_DIR
+              value: "/data"
+            - name: TEST_MODE
+              value: "true"
+            - name: API_KEY
+              valueFrom:
+                configMapKeyRef:
+                  name: dmi-api-config
+                  key: API_KEY
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: weather-data-pvc

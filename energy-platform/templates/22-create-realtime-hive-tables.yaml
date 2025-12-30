@@ -1,0 +1,116 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-realtime-hive-tables
+  namespace: {{ .Release.Namespace }}
+spec:
+  template:
+    spec:
+      securityContext:
+        runAsUser: 0
+      containers:
+      - name: hive-setup
+        image: public.ecr.aws/bitnami/spark:3.5
+        env:
+          - name: HOME
+            value: "/tmp"
+          - name: HADOOP_USER_NAME
+            value: "root"
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "Creating Hive external tables for real-time data..."
+            echo "================================================================"
+
+            # Download missing Hive HCatalog JAR for JsonSerDe
+            echo "Downloading hive-hcatalog-core JAR..."
+            curl -s -L -o /tmp/hive-hcatalog-core.jar https://repo1.maven.org/maven2/org/apache/hive/hcatalog/hive-hcatalog-core/3.1.3/hive-hcatalog-core-3.1.3.jar
+
+            # Create SQL script
+            cat > /tmp/create_realtime_tables.sql << 'EOFHIVE'
+            DROP TABLE IF EXISTS weather_wind_solar_area_hourly_realtime;
+            DROP TABLE IF EXISTS energy_actual_realtime;
+            DROP TABLE IF EXISTS energy_predictions_realtime_raw;
+
+            CREATE EXTERNAL TABLE IF NOT EXISTS weather_wind_solar_area_hourly_realtime (
+              timestamp STRING,
+              dk_area STRING,
+              year INT,
+              month INT,
+              day INT,
+              hour INT,
+              month_of_year INT,
+              hour_of_day INT,
+              wind_speed_avg DOUBLE,
+              wind_speed_max DOUBLE,
+              wind_direction_sin DOUBLE,
+              wind_direction_cos DOUBLE,
+              solar_radiation_1h DOUBLE,
+              sunshine_duration_1h DOUBLE,
+              cloud_cover_avg DOUBLE,
+              temperature_avg DOUBLE,
+              humidity_avg DOUBLE,
+              n_stations_wind INT,
+              n_stations_solar INT
+            )
+            ROW FORMAT SERDE 'org.apache.hive.hcatalog.data.JsonSerDe'
+            STORED AS TEXTFILE
+            LOCATION 'hdfs://namenode:9000/user/hive/warehouse/weather_wind_solar_area_hourly';
+
+            CREATE EXTERNAL TABLE IF NOT EXISTS energy_actual_realtime (
+              timestamp STRING,
+              dk_area STRING,
+              year INT,
+              month INT,
+              day INT,
+              hour INT,
+              total_production_mwh DOUBLE,
+              total_consumption_mwh DOUBLE,
+              net_balance_mwh DOUBLE,
+              SolarMWh DOUBLE,
+              OnshoreWindMWh DOUBLE,
+              OffshoreWindLt100MW_MWh DOUBLE,
+              OffshoreWindGe100MW_MWh DOUBLE
+            )
+            ROW FORMAT SERDE 'org.apache.hive.hcatalog.data.JsonSerDe'
+            STORED AS TEXTFILE
+            LOCATION 'hdfs://namenode:9000/user/hive/warehouse/energy_actual_realtime';
+
+            CREATE EXTERNAL TABLE IF NOT EXISTS energy_predictions_realtime_raw (
+              timestamp STRING,
+              dk_area STRING,
+              year INT,
+              month INT,
+              day INT,
+              hour INT,
+              weather STRING,
+              predictions STRING
+            )
+            ROW FORMAT SERDE 'org.apache.hive.hcatalog.data.JsonSerDe'
+            STORED AS TEXTFILE
+            LOCATION 'hdfs://namenode:9000/user/hive/warehouse/energy_predictions_realtime';
+
+            SHOW TABLES;
+            EOFHIVE
+
+            # Execute via Spark SQL
+            echo "Executing Hive DDL via Spark..."
+            spark-sql \
+              --master local[*] \
+              --jars /tmp/hive-hcatalog-core.jar \
+              --conf spark.driver.extraJavaOptions="-Duser.home=/tmp -Divy.home=/tmp/.ivy2 -Duser.name=root" \
+              --conf spark.sql.warehouse.dir=hdfs://namenode:9000/user/hive/warehouse \
+              --conf hive.metastore.uris=thrift://hive-metastore:9083 \
+              --conf spark.sql.catalogImplementation=hive \
+              --conf spark.hadoop.hadoop.security.authentication=simple \
+              --conf spark.hadoop.hadoop.security.authorization=false \
+              -f /tmp/create_realtime_tables.sql
+
+            echo ""
+            echo "================================================================"
+            echo "✓ Real-time Hive tables created successfully!"
+            echo "================================================================"
+
+      restartPolicy: Never
+  backoffLimit: 2

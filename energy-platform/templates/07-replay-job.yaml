@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: replay-history
+  namespace: {{ .Release.Namespace }}
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: replayer
+          image: dummystad/bigdata:fetcher-latest
+          imagePullPolicy: Always
+          command: ["python", "/app/scripts/replay_to_kafka.py"]
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "{{ .Release.Name }}-energy-cluster:9092"
+            - name: DATA_DIR
+              value: "/data"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+            - name: replay-script
+              mountPath: /app/scripts/replay_to_kafka.py
+              subPath: replay_to_kafka.py
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: weather-data-pvc
+        - name: replay-script
+          configMap:
+            name: replay-script
+            defaultMode: 0755

@@ -40,6 +40,8 @@ spark = SparkSession.builder \
     .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
     .config("hive.metastore.uris", "thrift://hive-metastore:9083") \
     .config("spark.sql.catalogImplementation", "hive") \
+    .config("spark.hadoop.hadoop.security.authentication", "simple") \
+    .config("spark.hadoop.hadoop.security.authorization", "false") \
     .enableHiveSupport() \
     .master("local[*]") \
     .getOrCreate()
@@ -94,12 +96,12 @@ def get_latest_weather_from_hive():
     """
     try:
         # Query the Hive table for latest weather data
-        print("\n  Querying Hive table: weather_wind_solar_area_hourly...")
+        print("\n  Querying Hive table: weather_wind_solar_area_hourly_realtime...")
 
         # Get the latest hour from Hive table
         query = """
         SELECT *
-        FROM weather_wind_solar_area_hourly
+        FROM weather_wind_solar_area_hourly_realtime
         ORDER BY year DESC, month DESC, day DESC, hour DESC
         LIMIT 2
         """
@@ -117,7 +119,7 @@ def get_latest_weather_from_hive():
 
         # Show what we found
         print(f"  ✓ Found {count} latest weather records")
-        latest_df.select("dk_area", "year", "month", "day", "hour", "wind_speed_mean_area").show()
+        latest_df.select("dk_area", "year", "month", "day", "hour", "wind_speed_avg").show()
 
         # Add derived features needed by ML model
         latest_df = latest_df.withColumn("month_of_year", F.col("month")) \
@@ -162,23 +164,14 @@ def make_predictions(weather_df):
             # Replace None values with appropriate defaults to avoid schema inference issues
             for key, value in row_dict.items():
                 if value is None:
-                    if key in ['wind_speed_mean_area', 'wind_speed_max_area', 'radia_glob_past1h_area',
-                               'cloud_cover_mean_area', 'wind_dir_sin_area', 'wind_dir_cos_area',
-                               'sun_last1h_glob_area']:
+                    if key in ['wind_speed_avg', 'wind_speed_max', 'solar_radiation_1h',
+                               'cloud_cover_avg', 'wind_direction_sin', 'wind_direction_cos',
+                               'sunshine_duration_1h']:
                         row_dict[key] = 0.0
                     else:
                         row_dict[key] = 0
 
             df_single = spark.createDataFrame([row_dict])
-
-            # Rename columns to match ML model expectations (trained with different names)
-            df_single = df_single.withColumnRenamed("wind_speed_mean_area", "wind_speed_avg") \
-                                 .withColumnRenamed("wind_speed_max_area", "wind_speed_max") \
-                                 .withColumnRenamed("wind_dir_sin_area", "wind_direction_sin") \
-                                 .withColumnRenamed("wind_dir_cos_area", "wind_direction_cos") \
-                                 .withColumnRenamed("radia_glob_past1h_area", "solar_radiation_1h") \
-                                 .withColumnRenamed("sun_last1h_glob_area", "sunshine_duration_1h") \
-                                 .withColumnRenamed("cloud_cover_mean_area", "cloud_cover_avg")
 
             # Make production prediction
             prod_pred = production_model.transform(df_single)

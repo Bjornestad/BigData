@@ -41,8 +41,8 @@ services:
   # Backend service
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: ../backend
+      dockerfile: ../backend/Dockerfile
     container_name: power-grid-backend
     ports:
       - "8080:8080"
@@ -62,8 +62,8 @@ services:
   # Frontend service
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: ../frontend
+      dockerfile: ../frontend/Dockerfile
     container_name: power-grid-frontend
     ports:
       - "3000:3000"
@@ -78,8 +78,8 @@ services:
   # Test data producer (optional)
   test-producer:
     build:
-      context: ./kafka-test
-      dockerfile: Dockerfile
+      context: ../kafka-test
+      dockerfile: ../kafka-test/Dockerfile
     container_name: test-producer
     environment:
       KAFKA_BROKERS: kafka:29092

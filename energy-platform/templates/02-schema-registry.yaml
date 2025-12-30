@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: schema-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: schema-registry
+  template:
+    metadata:
+      labels:
+        app: schema-registry
+    spec:
+      containers:
+        - name: schema-registry
+          image: confluentinc/cp-schema-registry:7.5.0
+          ports:
+            - containerPort: 8081
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Writing manual configuration..."
+              echo "listeners=http://0.0.0.0:8081" > /etc/schema-registry/schema-registry.properties
+              echo "kafkastore.bootstrap.servers=PLAINTEXT://{{ .Release.Name }}-energy-cluster:9092" >> /etc/schema-registry/schema-registry.properties
+
+              echo "kafkastore.topic.replication.factor=3" >> /etc/schema-registry/schema-registry.properties
+              echo "kafkastore.topic=_schemas" >> /etc/schema-registry/schema-registry.properties
+
+              echo "kafkastore.init.timeout.ms=300000" >> /etc/schema-registry/schema-registry.properties
+
+              echo "Starting Schema Registry..."
+              schema-registry-start /etc/schema-registry/schema-registry.properties
+
+          env:
+            - name: SCHEMA_REGISTRY_HOST_NAME
+              value: "schema-registry"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: schema-registry
+spec:
+  ports:
+    - port: 8081
+  selector:
+    app: schema-registry

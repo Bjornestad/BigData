@@ -1,0 +1,23 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-topics-job
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: kafka-cli
+          image: public.ecr.aws/bitnami/kafka:3.6.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              echo "Waiting for Kafka..."
+              sleep 45
+              echo "Creating topics..."
+              kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic weather-data --partitions 3 --replication-factor 3
+              kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic energy_actual --partitions 3 --replication-factor 3
+              kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic weather_hourly_ml --partitions 3 --replication-factor 3
+              kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic energy_predictions --partitions 3 --replication-factor 3
+              echo "Topics created successfully."
