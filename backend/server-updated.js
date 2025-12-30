@@ -2,8 +2,8 @@ const { Kafka } = require('kafkajs');
 const WebSocket = require('ws');
 const express = require('express');
 const http = require('http');
-const cors = require('cors');
 const { Pool } = require('pg');
+const cors = require('cors');
 
 // Configuration from environment variables
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
@@ -18,6 +18,25 @@ const MAX_DATA_POINTS = 100;
 let actualData = [];
 let predictedData = [];
 
+// Initialize PostgreSQL connection pool (optional - only if DATABASE_URL is provided)
+let pool = null;
+if (DATABASE_URL) {
+  pool = new Pool({
+    connectionString: DATABASE_URL,
+    max: 10,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 2000,
+  });
+
+  pool.query('SELECT NOW()', (err, res) => {
+    if (err) {
+      console.error('Database connection error:', err);
+    } else {
+      console.log('Database connected successfully');
+    }
+  });
+}
+
 // Initialize Kafka
 const kafka = new Kafka({
   clientId: 'power-grid-backend',
@@ -26,31 +45,13 @@ const kafka = new Kafka({
 
 const consumer = kafka.consumer({ groupId: CONSUMER_GROUP });
 
-// Initialize PostgreSQL pool (if DATABASE_URL is provided)
-let pool = null;
-if (DATABASE_URL) {
-  pool = new Pool({
-    connectionString: DATABASE_URL,
-    max: 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
-  });
-  
-  pool.on('error', (err) => {
-    console.error('Unexpected error on idle database client', err);
-  });
-  
-  console.log('Database connection pool initialized');
-} else {
-  console.warn('DATABASE_URL not set - historical queries disabled');
-}
-
-// Express app for health checks and API
+// Express app setup
 const app = express();
+const server = http.createServer(app);
+
+// Middleware
 app.use(cors());
 app.use(express.json());
-
-const server = http.createServer(app);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -58,11 +59,11 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     actualDataPoints: actualData.length,
     predictedDataPoints: predictedData.length,
-    databaseEnabled: !!pool
+    databaseConnected: pool !== null
   });
 });
 
-// Current data endpoint (in-memory buffer)
+// Current in-memory data endpoint
 app.get('/data', (req, res) => {
   res.json({
     actual: actualData,
@@ -70,93 +71,65 @@ app.get('/data', (req, res) => {
   });
 });
 
-// Historical data endpoint (from database)
+// Historical data endpoint (requires database)
 app.post('/api/historical', async (req, res) => {
   if (!pool) {
     return res.status(503).json({ 
       error: 'Database not configured',
-      message: 'Historical queries require DATABASE_URL to be set'
+      message: 'Historical data requires DATABASE_URL to be set'
     });
   }
-  
+
   try {
     const { start, end, type, interval } = req.body;
     
     if (!start || !end) {
-      return res.status(400).json({ 
-        error: 'Missing required parameters',
-        message: 'start and end timestamps are required'
-      });
+      return res.status(400).json({ error: 'start and end timestamps required' });
     }
-    
+
     const startDate = new Date(start);
     const endDate = new Date(end);
-    
-    // Validate dates
-    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-      return res.status(400).json({ 
-        error: 'Invalid date format',
-        message: 'start and end must be valid ISO 8601 timestamps'
-      });
-    }
-    
-    // Auto-select interval based on time range if not provided
-    let selectedInterval = interval;
-    if (!selectedInterval) {
-      const duration = endDate - startDate;
-      const hours = duration / (1000 * 60 * 60);
-      
-      if (hours <= 1) {
-        selectedInterval = '1 minute';
-      } else if (hours <= 24) {
-        selectedInterval = '5 minutes';
-      } else if (hours <= 168) { // 1 week
-        selectedInterval = '1 hour';
+    const duration = endDate - startDate;
+
+    // Auto-select interval based on time range if not specified
+    let queryInterval = interval;
+    if (!queryInterval) {
+      if (duration < 60 * 60 * 1000) {
+        // < 1 hour: raw data
+        queryInterval = 'raw';
+      } else if (duration < 24 * 60 * 60 * 1000) {
+        // < 24 hours: 1 minute
+        queryInterval = '1 minute';
+      } else if (duration < 7 * 24 * 60 * 60 * 1000) {
+        // < 7 days: 5 minutes
+        queryInterval = '5 minutes';
+      } else if (duration < 30 * 24 * 60 * 60 * 1000) {
+        // < 30 days: 1 hour
+        queryInterval = '1 hour';
       } else {
-        selectedInterval = '1 day';
+        // > 30 days: 1 day
+        queryInterval = '1 day';
       }
     }
-    
-    // Decide which table/view to use based on interval
-    let tableName;
-    if (selectedInterval.includes('minute')) {
-      tableName = 'measurements'; // Raw data
-    } else if (selectedInterval.includes('hour') || selectedInterval.includes('day')) {
-      // Check if we can use pre-aggregated views
-      if (selectedInterval === '5 minutes') {
-        tableName = 'measurements_5min';
-      } else if (selectedInterval === '1 hour') {
-        tableName = 'measurements_1hour';
-      } else if (selectedInterval === '1 day') {
-        tableName = 'measurements_1day';
-      } else {
-        tableName = 'measurements'; // Fallback to raw
-      }
-    } else {
-      tableName = 'measurements';
-    }
-    
-    // Build query
+
     let query, params;
-    
-    if (tableName.includes('measurements_')) {
-      // Query pre-aggregated view
+
+    if (queryInterval === 'raw') {
+      // Query raw data
       query = `
         SELECT 
-          bucket as timestamp,
-          type,
-          avg_value as value,
-          min_value as min,
-          max_value as max,
-          count
-        FROM ${tableName}
-        WHERE bucket >= $1 AND bucket < $2
+          time as timestamp,
+          value,
+          type
+        FROM measurements
+        WHERE time >= $1 AND time < $2
           AND ($3::varchar IS NULL OR type = $3)
-        ORDER BY bucket ASC
+        ORDER BY time ASC
+        LIMIT 10000
       `;
       params = [startDate, endDate, type || null];
     } else {
-      // Query raw data with aggregation
+      // Query aggregated data
       query = `
         SELECT 
           time_bucket($1, time) AS timestamp,
@@ -171,64 +144,65 @@ app.post('/api/historical', async (req, res) => {
         GROUP BY timestamp, type
         ORDER BY timestamp ASC
       `;
-      params = [selectedInterval, startDate, endDate, type || null];
+      params = [queryInterval, startDate, endDate, type || null];
     }
-    
+
     const result = await pool.query(query, params);
-    
+
     res.json({
       data: result.rows,
-      metadata: {
-        interval: selectedInterval,
-        source: tableName,
-        pointsReturned: result.rows.length,
-        timeRange: {
-          start: startDate.toISOString(),
-          end: endDate.toISOString()
-        }
-      }
+      interval: queryInterval,
+      count: result.rows.length
     });
+
   } catch (error) {
-    console.error('Error querying historical data:', error);
+    console.error('Historical query error:', error);
     res.status(500).json({ 
       error: 'Database query failed',
-      message: error.message
+      message: error.message 
     });
   }
 });
 
-// Stats endpoint (from database)
+// Statistics endpoint (requires database)
 app.post('/api/stats', async (req, res) => {
   if (!pool) {
-    return res.status(503).json({ 
-      error: 'Database not configured'
-    });
+    return res.status(503).json({ error: 'Database not configured' });
   }
-  
+
   try {
     const { start, end, type } = req.body;
     
-    const startDate = new Date(start || Date.now() - 24*60*60*1000);
-    const endDate = new Date(end || Date.now());
-    
-    const result = await pool.query(`
+    if (!start || !end) {
+      return res.status(400).json({ error: 'start and end timestamps required' });
+    }
+
+    const query = `
       SELECT 
         type,
+        COUNT(*) as count,
         AVG(value) as avg,
         MIN(value) as min,
         MAX(value) as max,
-        STDDEV(value) as stddev,
-        COUNT(*) as count
+        STDDEV(value) as stddev
       FROM measurements
       WHERE time >= $1 AND time < $2
         AND ($3::varchar IS NULL OR type = $3)
       GROUP BY type
-    `, [startDate, endDate, type || null]);
-    
-    res.json(result.rows);
+    `;
+
+    const result = await pool.query(query, [new Date(start), new Date(end), type || null]);
+
+    res.json({
+      stats: result.rows
+    });
+
   } catch (error) {
-    console.error('Error querying stats:', error);
-    res.status(500).json({ error: 'Database query failed' });
+    console.error('Stats query error:', error);
+    res.status(500).json({ 
+      error: 'Database query failed',
+      message: error.message 
+    });
   }
 });
 
@@ -245,7 +219,7 @@ function broadcast(data) {
 }
 
 wss.on('connection', (ws) => {
-  console.log('Client connected (total:', wss.clients.size, ')');
+  console.log('Client connected');
   
   // Send existing data to new client
   ws.send(JSON.stringify({
@@ -255,7 +229,7 @@ wss.on('connection', (ws) => {
   }));
 
   ws.on('close', () => {
-    console.log('Client disconnected (remaining:', wss.clients.size - 1, ')');
+    console.log('Client disconnected');
   });
 
   ws.on('error', (error) => {
@@ -278,6 +252,7 @@ async function setupKafka() {
           const value = JSON.parse(message.value.toString());
           
           if (topic === ACTUAL_TOPIC) {
+            // Expected format: { timestamp: ISO8601, value: number }
             const dataPoint = {
               timestamp: value.timestamp || new Date().toISOString(),
               value: parseFloat(value.value),
@@ -294,8 +269,9 @@ async function setupKafka() {
               data: dataPoint
             });
             
-            console.log('Actual:', dataPoint.value.toFixed(2), 'MW');
+            console.log('Actual:', dataPoint);
           } else if (topic === PREDICTED_TOPIC) {
+            // Expected format: { timestamp: ISO8601, value: number }
             const dataPoint = {
               timestamp: value.timestamp || new Date().toISOString(),
               value: parseFloat(value.value),
@@ -312,7 +288,7 @@ async function setupKafka() {
               data: dataPoint
             });
             
-            console.log('Predicted:', dataPoint.value.toFixed(2), 'MW');
+            console.log('Predicted:', dataPoint);
           }
         } catch (error) {
           console.error('Error processing message:', error);
@@ -321,6 +297,7 @@ async function setupKafka() {
     });
   } catch (error) {
     console.error('Error setting up Kafka:', error);
+    // Retry connection after 5 seconds
     setTimeout(setupKafka, 5000);
   }
 }
@@ -330,7 +307,11 @@ server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
   console.log(`HTTP API: http://localhost:${PORT}`);
-  console.log('');
+  if (DATABASE_URL) {
+    console.log('Historical data API enabled');
+  } else {
+    console.log('Historical data API disabled (no DATABASE_URL)');
+  }
   setupKafka();
 });
 
@@ -338,7 +319,9 @@ server.listen(PORT, () => {
 process.on('SIGTERM', async () => {
   console.log('SIGTERM signal received: closing HTTP server and Kafka consumer');
   await consumer.disconnect();
-  if (pool) await pool.end();
+  if (pool) {
+    await pool.end();
+  }
   server.close(() => {
     console.log('HTTP server closed');
     process.exit(0);

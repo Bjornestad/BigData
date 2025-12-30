@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: power-grid-config
+  namespace: power-grid-monitor
+data:
+  # Kafka configuration
+  KAFKA_BROKERS: "kafka-service:9092"  # Update this to your actual Kafka service
+  ACTUAL_TOPIC: "power-consumption-actual"
+  PREDICTED_TOPIC: "power-consumption-predicted"
+  
+  # Backend configuration
+  PORT: "8080"
+  
+  # Note: DATABASE_URL is stored in timescaledb-secret for security

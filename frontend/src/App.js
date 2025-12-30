@@ -6,7 +6,6 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
   ReferenceLine
 } from 'recharts';
@@ -15,6 +14,12 @@ import './App.css';
 function App() {
   const [data, setData] = useState([]);
   const [connectionStatus, setConnectionStatus] = useState('connecting');
+  const [dataSource, setDataSource] = useState('realtime');
+  const [timeRange, setTimeRange] = useState('realtime');
+  const [loading, setLoading] = useState(false);
+  const [showCustomRangePicker, setShowCustomRangePicker] = useState(false);
+  const [customStartDate, setCustomStartDate] = useState('');
+  const [customEndDate, setCustomEndDate] = useState('');
   const [stats, setStats] = useState({
     currentActual: null,
     currentPredicted: null,
@@ -22,11 +27,86 @@ function App() {
     avgPredicted: null,
     variance: null
   });
+  
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
 
   const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'ws://localhost:8080';
+  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8080';
 
+  // Fetch historical data from database
+  const fetchHistoricalData = useCallback(async (range, customStart = null, customEnd = null) => {
+    setLoading(true);
+    setDataSource('historical');
+    
+    try {
+      let startTime, endTime;
+      
+      if (range === 'custom' && customStart && customEnd) {
+        startTime = new Date(customStart);
+        endTime = new Date(customEnd);
+      } else {
+        endTime = new Date();
+        
+        switch (range) {
+          case '1h':
+            startTime = new Date(endTime - 60 * 60 * 1000);
+            break;
+          case '1d':
+            startTime = new Date(endTime - 24 * 60 * 60 * 1000);
+            break;
+          case '1w':
+            startTime = new Date(endTime - 7 * 24 * 60 * 60 * 1000);
+            break;
+          case '1m':
+            startTime = new Date(endTime - 30 * 24 * 60 * 60 * 1000);
+            break;
+          default:
+            startTime = new Date(endTime - 60 * 60 * 1000);
+        }
+      }
+      
+      const response = await fetch(`${API_URL}/api/historical`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          start: startTime.toISOString(),
+          end: endTime.toISOString()
+        })
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      
+      const result = await response.json();
+      
+      // Transform database format to chart format
+      const combined = {};
+      
+      result.data.forEach(point => {
+        const timestamp = new Date(point.timestamp).getTime();
+        if (!combined[timestamp]) {
+          combined[timestamp] = { timestamp };
+        }
+        combined[timestamp][point.type] = point.value;
+      });
+      
+      const sortedData = Object.values(combined).sort((a, b) => a.timestamp - b.timestamp);
+      setData(sortedData);
+      
+      console.log(`Loaded ${sortedData.length} points from database (${result.metadata.interval} interval)`);
+    } catch (error) {
+      console.error('Error fetching historical data:', error);
+      alert('Failed to load historical data. Is the database configured?');
+    } finally {
+      setLoading(false);
+    }
+  }, [API_URL]);
+
+  // Connect to WebSocket for real-time data
   const connectWebSocket = useCallback(() => {
     try {
       const ws = new WebSocket(BACKEND_URL);
@@ -35,6 +115,7 @@ function App() {
       ws.onopen = () => {
         console.log('WebSocket connected');
         setConnectionStatus('connected');
+        setDataSource('realtime');
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
         }
@@ -44,7 +125,6 @@ function App() {
         const message = JSON.parse(event.data);
 
         if (message.type === 'initial') {
-          // Process initial data
           const combined = {};
           
           message.actual.forEach(point => {
@@ -66,7 +146,6 @@ function App() {
           const sortedData = Object.values(combined).sort((a, b) => a.timestamp - b.timestamp);
           setData(sortedData);
         } else if (message.type === 'actual' || message.type === 'predicted') {
-          // Add new data point
           const point = message.data;
           const timestamp = new Date(point.timestamp).getTime();
 
@@ -86,7 +165,6 @@ function App() {
               });
             }
 
-            // Keep only last 100 points
             return newData.sort((a, b) => a.timestamp - b.timestamp).slice(-100);
           });
         }
@@ -102,7 +180,6 @@ function App() {
         setConnectionStatus('disconnected');
         wsRef.current = null;
         
-        // Attempt to reconnect after 3 seconds
         reconnectTimeoutRef.current = setTimeout(() => {
           console.log('Attempting to reconnect...');
           setConnectionStatus('reconnecting');
@@ -115,8 +192,45 @@ function App() {
     }
   }, [BACKEND_URL]);
 
+  // Handle time range change
+  const handleTimeRangeChange = (newRange) => {
+    setTimeRange(newRange);
+    
+    if (newRange === 'realtime') {
+      if (wsRef.current && wsRef.current.readyState !== WebSocket.OPEN) {
+        connectWebSocket();
+      }
+      setDataSource('realtime');
+    } else if (newRange === 'custom') {
+      setShowCustomRangePicker(true);
+    } else {
+      fetchHistoricalData(newRange);
+    }
+  };
+
+  // Handle custom range submission
+  const handleCustomRangeSubmit = () => {
+    if (!customStartDate || !customEndDate) {
+      alert('Please select both start and end dates');
+      return;
+    }
+    
+    const start = new Date(customStartDate);
+    const end = new Date(customEndDate);
+    
+    if (start >= end) {
+      alert('Start date must be before end date');
+      return;
+    }
+    
+    setShowCustomRangePicker(false);
+    fetchHistoricalData('custom', customStartDate, customEndDate);
+  };
+
   useEffect(() => {
-    connectWebSocket();
+    if (timeRange === 'realtime') {
+      connectWebSocket();
+    }
 
     return () => {
       if (wsRef.current) {
@@ -126,7 +240,7 @@ function App() {
         clearTimeout(reconnectTimeoutRef.current);
       }
     };
-  }, [connectWebSocket]);
+  }, [connectWebSocket, timeRange]);
 
   // Calculate statistics
   useEffect(() => {
@@ -161,17 +275,27 @@ function App() {
 
   const formatXAxis = (timestamp) => {
     const date = new Date(timestamp);
-    return date.toLocaleTimeString('en-US', { 
-      hour: '2-digit', 
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false 
-    });
-  };
-
-  const formatTooltip = (value, name) => {
-    const label = name === 'actual' ? 'Actual' : 'Predicted';
-    return [`${value.toFixed(2)} MW`, label];
+    
+    if (timeRange === 'realtime' || timeRange === '1h') {
+      return date.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false 
+      });
+    } else if (timeRange === '1d') {
+      return date.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit',
+        hour12: false 
+      });
+    } else {
+      return date.toLocaleDateString('en-US', { 
+        month: 'short', 
+        day: 'numeric',
+        hour: '2-digit'
+      });
+    }
   };
 
   const CustomTooltip = ({ active, payload }) => {
@@ -193,8 +317,14 @@ function App() {
     return null;
   };
 
-  const now = Date.now();
   const hasData = data.length > 0;
+  
+  const getTimeRangeLabel = () => {
+    if (timeRange === 'custom' && customStartDate && customEndDate) {
+      return `${new Date(customStartDate).toLocaleDateString()} - ${new Date(customEndDate).toLocaleDateString()}`;
+    }
+    return timeRange.toUpperCase();
+  };
 
   return (
     <div className="App">
@@ -214,14 +344,139 @@ function App() {
           <div className="connection-status">
             <div className={`status-indicator ${connectionStatus}`}></div>
             <span className="status-text">
-              {connectionStatus === 'connected' ? 'LIVE' :
-               connectionStatus === 'connecting' ? 'CONNECTING' :
-               connectionStatus === 'reconnecting' ? 'RECONNECTING' :
-               connectionStatus === 'error' ? 'ERROR' : 'OFFLINE'}
+              {dataSource === 'realtime' ? (
+                connectionStatus === 'connected' ? 'LIVE' :
+                connectionStatus === 'connecting' ? 'CONNECTING' :
+                connectionStatus === 'reconnecting' ? 'RECONNECTING' :
+                connectionStatus === 'error' ? 'ERROR' : 'OFFLINE'
+              ) : (
+                loading ? 'LOADING' : 'HISTORICAL'
+              )}
             </span>
           </div>
         </div>
       </header>
+
+      {/* Time Range Selector */}
+      <div className="time-range-selector">
+        <button 
+          className={timeRange === 'realtime' ? 'active' : ''} 
+          onClick={() => handleTimeRangeChange('realtime')}
+        >
+          LIVE
+        </button>
+        <button 
+          className={timeRange === '1h' ? 'active' : ''} 
+          onClick={() => handleTimeRangeChange('1h')}
+        >
+          1 HOUR
+        </button>
+        <button 
+          className={timeRange === '1d' ? 'active' : ''} 
+          onClick={() => handleTimeRangeChange('1d')}
+        >
+          1 DAY
+        </button>
+        <button 
+          className={timeRange === '1w' ? 'active' : ''} 
+          onClick={() => handleTimeRangeChange('1w')}
+        >
+          1 WEEK
+        </button>
+        <button 
+          className={timeRange === '1m' ? 'active' : ''} 
+          onClick={() => handleTimeRangeChange('1m')}
+        >
+          1 MONTH
+        </button>
+        <button 
+          className={timeRange === 'custom' ? 'active custom-range-btn' : 'custom-range-btn'} 
+          onClick={() => handleTimeRangeChange('custom')}
+        >
+          📅 CUSTOM RANGE
+        </button>
+      </div>
+
+      {/* Custom Range Picker Modal */}
+      {showCustomRangePicker && (
+        <div className="modal-overlay" onClick={() => setShowCustomRangePicker(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Select Custom Date Range</h2>
+              <button 
+                className="modal-close" 
+                onClick={() => setShowCustomRangePicker(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="date-picker-group">
+                <label>
+                  <span className="date-label">Start Date & Time</span>
+                  <input 
+                    type="datetime-local" 
+                    value={customStartDate}
+                    onChange={(e) => setCustomStartDate(e.target.value)}
+                    max={customEndDate || undefined}
+                  />
+                </label>
+                <label>
+                  <span className="date-label">End Date & Time</span>
+                  <input 
+                    type="datetime-local" 
+                    value={customEndDate}
+                    onChange={(e) => setCustomEndDate(e.target.value)}
+                    min={customStartDate || undefined}
+                    max={new Date().toISOString().slice(0, 16)}
+                  />
+                </label>
+              </div>
+              <div className="quick-presets">
+                <p className="presets-label">Quick Presets:</p>
+                <button onClick={() => {
+                  const end = new Date();
+                  const start = new Date(end - 6 * 60 * 60 * 1000);
+                  setCustomStartDate(start.toISOString().slice(0, 16));
+                  setCustomEndDate(end.toISOString().slice(0, 16));
+                }}>
+                  Last 6 Hours
+                </button>
+                <button onClick={() => {
+                  const end = new Date();
+                  const start = new Date(end - 12 * 60 * 60 * 1000);
+                  setCustomStartDate(start.toISOString().slice(0, 16));
+                  setCustomEndDate(end.toISOString().slice(0, 16));
+                }}>
+                  Last 12 Hours
+                </button>
+                <button onClick={() => {
+                  const end = new Date();
+                  const start = new Date(end - 3 * 24 * 60 * 60 * 1000);
+                  setCustomStartDate(start.toISOString().slice(0, 16));
+                  setCustomEndDate(end.toISOString().slice(0, 16));
+                }}>
+                  Last 3 Days
+                </button>
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button 
+                className="btn-secondary" 
+                onClick={() => setShowCustomRangePicker(false)}
+              >
+                Cancel
+              </button>
+              <button 
+                className="btn-primary" 
+                onClick={handleCustomRangeSubmit}
+              >
+                Apply Range
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="stats-panel">
         <div className="stat-card actual">
@@ -259,7 +514,7 @@ function App() {
 
       <div className="chart-container">
         <div className="chart-header">
-          <h2>Consumption Timeline</h2>
+          <h2>Consumption Timeline - {getTimeRangeLabel()}</h2>
           <div className="legend-custom">
             <div className="legend-item">
               <div className="legend-line actual"></div>
@@ -272,7 +527,12 @@ function App() {
           </div>
         </div>
         
-        {hasData ? (
+        {loading ? (
+          <div className="no-data">
+            <div className="loading-spinner"></div>
+            <p>Loading historical data...</p>
+          </div>
+        ) : hasData ? (
           <ResponsiveContainer width="100%" height={500}>
             <LineChart data={data} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
               <defs>
@@ -310,13 +570,15 @@ function App() {
               
               <Tooltip content={<CustomTooltip />} />
               
-              <ReferenceLine 
-                x={now} 
-                stroke="#ff6b35" 
-                strokeDasharray="5 5" 
-                strokeWidth={2}
-                label={{ value: 'NOW', position: 'top', fill: '#ff6b35', fontSize: 12 }}
-              />
+              {dataSource === 'realtime' && (
+                <ReferenceLine 
+                  x={Date.now()} 
+                  stroke="#ff6b35" 
+                  strokeDasharray="5 5" 
+                  strokeWidth={2}
+                  label={{ value: 'NOW', position: 'top', fill: '#ff6b35', fontSize: 12 }}
+                />
+              )}
               
               <Line 
                 type="monotone" 
@@ -352,9 +614,9 @@ function App() {
         <div className="footer-info">
           <span>Data Points: {data.length}</span>
           <span>•</span>
-          <span>Update Rate: Real-time</span>
+          <span>Source: {dataSource === 'realtime' ? 'WebSocket (Backend Buffer)' : 'Database (TimescaleDB)'}</span>
           <span>•</span>
-          <span>System Status: {connectionStatus.toUpperCase()}</span>
+          <span>Status: {connectionStatus.toUpperCase()}</span>
         </div>
       </footer>
     </div>
