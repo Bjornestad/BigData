@@ -18,7 +18,7 @@ spec:
       containers:
       - name: predictor
         image: dummystad/bigdata:prediction-service-latest
-        imagePullPolicy: IfNotPresent
+        imagePullPolicy: Always
         env:
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "{{ .Release.Name }}-energy-cluster:9092"

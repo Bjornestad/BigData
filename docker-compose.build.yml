@@ -30,3 +30,9 @@ services:
     build:
       context: ./Docker/prediction-service
       dockerfile: Dockerfile
+
+  database-writer:
+    image: dummystad/bigdata:database-writer-latest
+    build:
+      context: ./Docker/database-writer
+      dockerfile: Dockerfile

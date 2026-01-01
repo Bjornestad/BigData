@@ -14,6 +14,15 @@ WORKDIR /app
 # Copy SparkML code and models
 COPY SparkML /app/SparkML
 
+# Log files before deletion
+RUN echo "Files before cleanup:" && find /app/SparkML -name "*.crc"
+
+# Remove .crc files to avoid checksum errors
+RUN find /app/SparkML -name "*.crc" -type f -delete
+
+# Log files after deletion to verify
+RUN echo "Files after cleanup (should be empty):" && find /app/SparkML -name "*.crc"
+
 # Set environment variables
 ENV JAVA_HOME="/opt/java/openjdk"
 ENV HADOOP_USER_NAME="root"

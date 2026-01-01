@@ -16,7 +16,7 @@ spec:
         - name: kafka-ui
           image: provectuslabs/kafka-ui:latest
           ports:
-            - containerPort: 8080
+            - containerPort: 8090
           env:
             - name: KAFKA_CLUSTERS_0_NAME
               value: "energy-cluster"

@@ -4,11 +4,12 @@ const express = require('express');
 const http = require('http');
 const cors = require('cors');
 const { Pool } = require('pg');
+const { URL } = require('url');
 
 // Configuration from environment variables
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
-const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'power-consumption-actual';
-const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'power-consumption-predicted';
+const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'energy_actual';
+const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'energy_predictions';
 const PORT = process.env.PORT || 8080;
 const CONSUMER_GROUP = process.env.CONSUMER_GROUP || 'power-grid-monitor';
 const DATABASE_URL = process.env.DATABASE_URL;
@@ -22,6 +23,10 @@ let predictedData = [];
 const kafka = new Kafka({
   clientId: 'power-grid-backend',
   brokers: KAFKA_BROKERS,
+  retry: {
+    initialRetryTime: 300,
+    retries: 15
+  }
 });
 
 const consumer = kafka.consumer({ groupId: CONSUMER_GROUP });
@@ -29,18 +34,48 @@ const consumer = kafka.consumer({ groupId: CONSUMER_GROUP });
 // Initialize PostgreSQL pool (if DATABASE_URL is provided)
 let pool = null;
 if (DATABASE_URL) {
-  pool = new Pool({
-    connectionString: DATABASE_URL,
-    max: 10,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 10000,
-  });
-  
-  pool.on('error', (err) => {
-    console.error('Unexpected error on idle database client', err);
-  });
-  
-  console.log('Database connection pool initialized');
+  try {
+    console.log('Initializing database connection...');
+    // Manually parse the URL to avoid issues with pg-connection-string
+    const dbUrl = new URL(DATABASE_URL);
+
+    const config = {
+      user: dbUrl.username,
+      password: decodeURIComponent(dbUrl.password),
+      host: dbUrl.hostname,
+      port: parseInt(dbUrl.port) || 5432,
+      database: dbUrl.pathname.slice(1),
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    };
+
+    pool = new Pool(config);
+
+    pool.on('error', (err) => {
+      console.error('Unexpected error on idle database client', err);
+    });
+
+    console.log('Database connection pool initialized');
+
+    // Test connection
+    pool.query('SELECT NOW()', (err, res) => {
+      if (err) {
+        console.error('Database connection test failed:', err);
+      } else {
+        console.log('Database connection test successful');
+      }
+    });
+  } catch (error) {
+    console.error('Error initializing database pool:', error);
+    // Fallback
+    pool = new Pool({
+      connectionString: DATABASE_URL,
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    });
+  }
 } else {
   console.warn('DATABASE_URL not set - historical queries disabled');
 }

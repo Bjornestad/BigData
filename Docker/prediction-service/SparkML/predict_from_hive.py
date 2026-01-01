@@ -17,8 +17,8 @@ import pyspark.sql.functions as F
 # Configuration
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
 OUTPUT_TOPIC = os.getenv("OUTPUT_TOPIC", "energy_predictions")
-PRODUCTION_MODEL_PATH = os.getenv("PRODUCTION_MODEL_PATH", "./SparkML/models/energy_model_production_20251227_235847")
-CONSUMPTION_MODEL_PATH = os.getenv("CONSUMPTION_MODEL_PATH", "./SparkML/models/energy_model_consumption_20251227_235915")
+PRODUCTION_MODEL_PATH = os.getenv("PRODUCTION_MODEL_PATH", "./SparkML/models/production_model")
+CONSUMPTION_MODEL_PATH = os.getenv("CONSUMPTION_MODEL_PATH", "./SparkML/models/consumption_model")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "3600"))  # Check every hour
 
 print(f"""
@@ -38,19 +38,28 @@ print("Initializing Spark session with Hive support...")
 spark = SparkSession.builder \
     .appName("HiveBasedEnergyPrediction") \
     .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
-    .config("hive.metastore.uris", "thrift://hive-metastore:9083") \
+    .config("spark.hadoop.hive.metastore.uris", "thrift://hive-metastore:9083") \
     .config("spark.sql.catalogImplementation", "hive") \
     .config("spark.hadoop.hadoop.security.authentication", "simple") \
     .config("spark.hadoop.hadoop.security.authorization", "false") \
+    .config("spark.hadoop.fs.file.impl.disable.cache", "true") \
+    .config("spark.hadoop.mapreduce.fileoutputcommitter.marksuccessfuljobs", "false") \
     .enableHiveSupport() \
     .master("local[*]") \
     .getOrCreate()
+
+# Disable checksum verification for local file system
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.file.impl.disable.cache", "true")
+spark.sparkContext._jsc.hadoopConfiguration().set("fs.checksum.disabled", "true")
 
 spark.sparkContext.setLogLevel("WARN")
 
 # Test Hive connection
 try:
+    print("Checking Hive databases...")
     spark.sql("SHOW DATABASES").show()
+    print("Checking Hive tables in default...")
+    spark.sql("SHOW TABLES IN default").show()
     print("✓ Hive connection established")
 except Exception as e:
     print(f"✗ Failed to connect to Hive: {e}")
