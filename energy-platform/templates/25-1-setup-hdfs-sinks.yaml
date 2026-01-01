@@ -128,7 +128,14 @@ spec:
             echo "VERIFYING CONNECTORS"
             echo "================================================================"
 
-            sleep 5
+            for connector in hdfs-sink-weather-ml hdfs-sink-energy-actual hdfs-sink-energy-predictions; do
+              echo "Waiting for connector $connector to be ready..."
+              until curl -s "$CONNECT_URL/connectors/$connector/status" | grep -q '"state":"RUNNING"'; do
+                echo "  Connector $connector not ready yet, waiting..."
+                sleep 5
+              done
+              echo "✓ Connector $connector is ready"
+            done
 
             echo ""
             echo "Active connectors:"

@@ -2,11 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend
-  namespace: {{ .Release.Namespace }}
+  namespace: power-grid-monitor
   labels:
     app: backend
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: backend
@@ -17,8 +17,8 @@ spec:
     spec:
       containers:
       - name: backend
-        image: {{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag | default "latest" }}
-        imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+        image: power-grid-backend:latest
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
           name: http
@@ -26,30 +26,34 @@ spec:
         - name: KAFKA_BROKERS
           valueFrom:
             configMapKeyRef:
-              name: backend-config
+              name: power-grid-config
               key: KAFKA_BROKERS
         - name: ACTUAL_TOPIC
           valueFrom:
             configMapKeyRef:
-              name: backend-config
+              name: power-grid-config
               key: ACTUAL_TOPIC
         - name: PREDICTED_TOPIC
           valueFrom:
             configMapKeyRef:
-              name: backend-config
+              name: power-grid-config
               key: PREDICTED_TOPIC
         - name: CONSUMER_GROUP
-          value: "power-grid-monitor-realtime"
+          value: "power-grid-monitor"
         - name: PORT
-          valueFrom:
-            configMapKeyRef:
-              name: backend-config
-              key: PORT
+          value: "8080"
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
               name: timescaledb-secret
               key: connection-string
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
         livenessProbe:
           httpGet:
             path: /health
@@ -62,27 +66,17 @@ spec:
             port: 8080
           initialDelaySeconds: 10
           periodSeconds: 5
-        resources:
-          requests:
-            memory: "256Mi"
-            cpu: "250m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: backend-service
-  namespace: {{ .Release.Namespace }}
-  labels:
-    app: backend
+  namespace: power-grid-monitor
 spec:
-  type: ClusterIP
-  ports:
-  - port: 8080
-    targetPort: 8080
-    protocol: TCP
-    name: http
   selector:
     app: backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  type: ClusterIP

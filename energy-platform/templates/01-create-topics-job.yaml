@@ -14,7 +14,10 @@ spec:
           args:
             - |
               echo "Waiting for Kafka..."
-              sleep 45
+              until kafka-topics.sh --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --list; do
+                echo "Waiting for Kafka broker..."
+                sleep 5
+              done
               echo "Creating topics..."
               kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic weather-data --partitions 3 --replication-factor 3
               kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic energy_actual --partitions 3 --replication-factor 3

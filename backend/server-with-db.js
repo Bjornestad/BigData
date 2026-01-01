@@ -280,17 +280,15 @@ async function setupKafka() {
           if (topic === ACTUAL_TOPIC) {
             const dataPoint = {
               timestamp: value.timestamp || new Date().toISOString(),
-              value: parseFloat(value.total_consumption_mwh || value.value || 0),
-              production: parseFloat(value.total_production_mwh || 0),
-              dk_area: value.dk_area,
+              value: parseFloat(value.value),
               type: 'actual'
             };
-
+            
             actualData.push(dataPoint);
             if (actualData.length > MAX_DATA_POINTS) {
               actualData.shift();
             }
-
+            
             broadcast({
               type: 'actual',
               data: dataPoint
@@ -300,18 +298,15 @@ async function setupKafka() {
           } else if (topic === PREDICTED_TOPIC) {
             const dataPoint = {
               timestamp: value.timestamp || new Date().toISOString(),
-              value: parseFloat(value.predictions?.consumption_mwh || value.value || 0),
-              production: parseFloat(value.predictions?.production_mwh || 0),
-              net_balance: parseFloat(value.predictions?.net_balance_mwh || 0),
-              dk_area: value.dk_area,
+              value: parseFloat(value.value),
               type: 'predicted'
             };
-
+            
             predictedData.push(dataPoint);
             if (predictedData.length > MAX_DATA_POINTS) {
               predictedData.shift();
             }
-
+            
             broadcast({
               type: 'predicted',
               data: dataPoint

@@ -19,9 +19,6 @@ spec:
             export HADOOP_HOME=/opt/hadoop-3.3.1
             export PATH=$HADOOP_HOME/bin:$PATH
 
-            echo "Waiting for NameNode to be ready..."
-            sleep 60
-
             echo "Configuring HDFS client..."
 
             cat > $HADOOP_HOME/etc/hadoop/core-site.xml <<'HDFS_CONFIG'
@@ -33,6 +30,12 @@ spec:
               </property>
             </configuration>
             HDFS_CONFIG
+
+            echo "Waiting for NameNode to be ready..."
+            until hdfs dfsadmin -report; do
+              echo "NameNode not ready yet, sleeping for 5 seconds..."
+              sleep 5
+            done
 
             echo "Creating HDFS directory..."
             hdfs dfs -mkdir -p /user/hive/warehouse/station_metadata

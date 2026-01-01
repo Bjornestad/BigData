@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: backend
-  namespace: {{ .Release.Namespace }}
+  namespace: power-grid-monitor
   labels:
     app: backend
 spec:
@@ -17,8 +17,8 @@ spec:
     spec:
       containers:
       - name: backend
-        image: {{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag | default "latest" }}
-        imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+        image: power-grid-backend:latest
+        imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 8080
           name: http
@@ -26,24 +26,24 @@ spec:
         - name: KAFKA_BROKERS
           valueFrom:
             configMapKeyRef:
-              name: backend-config
+              name: power-grid-config
               key: KAFKA_BROKERS
         - name: ACTUAL_TOPIC
           valueFrom:
             configMapKeyRef:
-              name: backend-config
+              name: power-grid-config
               key: ACTUAL_TOPIC
         - name: PREDICTED_TOPIC
           valueFrom:
             configMapKeyRef:
-              name: backend-config
+              name: power-grid-config
               key: PREDICTED_TOPIC
         - name: CONSUMER_GROUP
           value: "power-grid-monitor-realtime"
         - name: PORT
           valueFrom:
             configMapKeyRef:
-              name: backend-config
+              name: power-grid-config
               key: PORT
         - name: DATABASE_URL
           valueFrom:
@@ -74,7 +74,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: backend-service
-  namespace: {{ .Release.Namespace }}
+  namespace: power-grid-monitor
   labels:
     app: backend
 spec:
