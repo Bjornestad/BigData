@@ -15,6 +15,25 @@ spec:
       labels:
         app: backend
     spec:
+      # Init container to wait for Kafka to be ready
+      initContainers:
+      - name: wait-for-kafka
+        image: public.ecr.aws/bitnami/kafka:3.6.1
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for Kafka broker to be ready..."
+          until kafka-broker-api-versions.sh --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 > /dev/null 2>&1; do
+            echo "Kafka not ready yet, waiting 5 seconds..."
+            sleep 5
+          done
+          echo "Kafka broker is ready!"
+          
+          echo "Checking topics..."
+          kafka-topics.sh --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --list || true
+          echo "Init complete!"
+      
       containers:
       - name: backend
         image: {{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag | default "latest" }}
@@ -50,18 +69,29 @@ spec:
             secretKeyRef:
               name: timescaledb-secret
               key: connection-string
+        # Startup probe - gives more time for initial Kafka connection
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          failureThreshold: 30
+          periodSeconds: 10
         livenessProbe:
           httpGet:
             path: /health
             port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         readinessProbe:
           httpGet:
             path: /health
             port: 8080
           initialDelaySeconds: 10
           periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
         resources:
           requests:
             memory: "256Mi"

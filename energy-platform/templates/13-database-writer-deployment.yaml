@@ -15,6 +15,21 @@ spec:
       labels:
         app: database-writer
     spec:
+      # Init container to wait for Kafka to be ready
+      initContainers:
+      - name: wait-for-kafka
+        image: public.ecr.aws/bitnami/kafka:3.6.1
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for Kafka broker to be ready..."
+          until kafka-broker-api-versions.sh --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 > /dev/null 2>&1; do
+            echo "Kafka not ready yet, waiting 5 seconds..."
+            sleep 5
+          done
+          echo "Kafka broker is ready!"
+      
       containers:
       - name: database-writer
         image: {{ .Values.database_writer.image.repository }}:{{ .Values.database_writer.image.tag | default "latest" }}
@@ -53,19 +68,26 @@ spec:
           limits:
             memory: "512Mi"
             cpu: "500m"
+        # Startup probe - gives more time for initial connection
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          failureThreshold: 30
+          periodSeconds: 10
         livenessProbe:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - pgrep -f "node index.js"
+          httpGet:
+            path: /health
+            port: 8081
           initialDelaySeconds: 30
           periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
         readinessProbe:
-          exec:
-            command:
-            - /bin/sh
-            - -c
-            - pgrep -f "node index.js"
+          httpGet:
+            path: /health
+            port: 8081
           initialDelaySeconds: 10
           periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
