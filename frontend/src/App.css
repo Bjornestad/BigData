@@ -793,6 +793,159 @@ body {
   letter-spacing: 1px;
 }
 
+/* Debug Panel */
+.debug-panel {
+  position: relative;
+  z-index: 10;
+  background: rgba(13, 27, 42, 0.95);
+  border: 2px solid rgba(255, 107, 53, 0.3);
+  border-radius: 8px;
+  padding: 2rem;
+  margin-top: 2rem;
+  backdrop-filter: blur(10px);
+  animation: fadeIn 1.4s ease-out 0.8s both;
+}
+
+.debug-panel h3 {
+  color: var(--accent-orange);
+  font-size: 1.5rem;
+  margin-bottom: 1.5rem;
+  text-align: center;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  font-weight: 700;
+}
+
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 1.5rem;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.debug-section {
+  background: rgba(26, 42, 64, 0.6);
+  border: 1px solid rgba(0, 255, 136, 0.2);
+  border-radius: 8px;
+  padding: 1.5rem;
+  transition: all 0.3s ease;
+}
+
+.debug-section:hover {
+  border-color: rgba(0, 255, 136, 0.4);
+  box-shadow: 0 4px 12px rgba(0, 255, 136, 0.1);
+  transform: translateY(-2px);
+}
+
+.debug-section.full-width {
+  grid-column: 1 / -1;
+}
+
+.debug-section h4 {
+  color: var(--accent-green);
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid rgba(0, 255, 136, 0.2);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-weight: 600;
+}
+
+.debug-section table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.debug-section table td {
+  padding: 0.5rem 0;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.debug-section table td:first-child {
+  color: var(--text-secondary);
+  width: 50%;
+  font-weight: 500;
+}
+
+.debug-section table td:last-child {
+  color: var(--text-primary);
+  font-family: 'Share Tech Mono', monospace;
+  word-break: break-all;
+}
+
+.debug-section table strong {
+  color: var(--accent-green);
+  font-weight: 600;
+}
+
+.debug-code {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(176, 102, 255, 0.3);
+  border-radius: 4px;
+  padding: 1rem;
+  overflow-x: auto;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.debug-code pre {
+  margin: 0;
+  color: #b8c5d6;
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* Scrollbar styling for debug code */
+.debug-code::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.debug-code::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+
+.debug-code::-webkit-scrollbar-thumb {
+  background: rgba(176, 102, 255, 0.4);
+  border-radius: 4px;
+}
+
+.debug-code::-webkit-scrollbar-thumb:hover {
+  background: rgba(176, 102, 255, 0.6);
+}
+
+/* Responsive Design for Debug Panel */
+@media (max-width: 1400px) {
+  .debug-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .debug-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .debug-section table td:first-child {
+    width: 40%;
+  }
+  
+  .debug-panel {
+    padding: 1.5rem;
+  }
+  
+  .debug-panel h3 {
+    font-size: 1.2rem;
+  }
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
   .app-header h1 {

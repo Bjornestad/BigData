@@ -619,6 +619,92 @@ function App() {
           <span>Status: {connectionStatus.toUpperCase()}</span>
         </div>
       </footer>
+
+      {/* Debug Panel */}
+      <div className="debug-panel">
+        <h3>🔍 Debug Information</h3>
+        <div className="debug-grid">
+          <div className="debug-section">
+            <h4>Data Overview</h4>
+            <table>
+              <tbody>
+                <tr><td><strong>Total Points:</strong></td><td>{data.length}</td></tr>
+                <tr><td><strong>Points with Actual:</strong></td><td>{data.filter(d => d.actual !== undefined).length}</td></tr>
+                <tr><td><strong>Points with Predicted:</strong></td><td>{data.filter(d => d.predicted !== undefined).length}</td></tr>
+                <tr><td><strong>Time Range:</strong></td><td>{timeRange}</td></tr>
+                <tr><td><strong>Data Source:</strong></td><td>{dataSource}</td></tr>
+                <tr><td><strong>Loading:</strong></td><td>{loading ? 'Yes' : 'No'}</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div className="debug-section">
+            <h4>Time Range</h4>
+            <table>
+              <tbody>
+                <tr>
+                  <td><strong>First Point:</strong></td>
+                  <td>{data.length > 0 ? new Date(data[0].timestamp).toLocaleString() : 'N/A'}</td>
+                </tr>
+                <tr>
+                  <td><strong>Last Point:</strong></td>
+                  <td>{data.length > 0 ? new Date(data[data.length - 1].timestamp).toLocaleString() : 'N/A'}</td>
+                </tr>
+                <tr>
+                  <td><strong>Duration:</strong></td>
+                  <td>
+                    {data.length >= 2 
+                      ? `${Math.round((data[data.length - 1].timestamp - data[0].timestamp) / (1000 * 60))} minutes`
+                      : 'N/A'
+                    }
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div className="debug-section">
+            <h4>WebSocket Status</h4>
+            <table>
+              <tbody>
+                <tr><td><strong>Connection:</strong></td><td>{connectionStatus}</td></tr>
+                <tr><td><strong>Backend URL:</strong></td><td>{BACKEND_URL}</td></tr>
+                <tr><td><strong>API URL:</strong></td><td>{API_URL}</td></tr>
+                <tr>
+                  <td><strong>Ready State:</strong></td>
+                  <td>
+                    {wsRef.current ? 
+                      ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][wsRef.current.readyState] 
+                      : 'Not initialized'
+                    }
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div className="debug-section full-width">
+            <h4>Sample Data (Last 5 Points)</h4>
+            <div className="debug-code">
+              <pre>{JSON.stringify(data.slice(-5), null, 2)}</pre>
+            </div>
+          </div>
+
+          {dataSource === 'historical' && (
+            <div className="debug-section full-width">
+              <h4>Last API Request</h4>
+              <div className="debug-code">
+                <pre>{JSON.stringify({
+                  timeRange,
+                  customStartDate,
+                  customEndDate,
+                  endpoint: `${API_URL}/api/historical`
+                }, null, 2)}</pre>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
