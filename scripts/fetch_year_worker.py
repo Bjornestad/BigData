@@ -1,6 +1,6 @@
 """
 Kubernetes worker script to fetch data for a specific year.
-Fetches both DMI weather data and Energy production data.
+Fetches both DMI weather data and Energy production/consumption data.
 """
 import os
 import sys
@@ -23,7 +23,8 @@ load_dotenv()
 
 # === CONFIG ===
 DMI_API_URL = "https://dmigw.govcloud.dk/v2/metObs/collections/observation/items"
-ENERGY_API_URL = "https://api.energidataservice.dk/dataset/ProductionMunicipalityHour"
+ENERGY_PROD_API_URL = "https://api.energidataservice.dk/dataset/ProductionMunicipalityHour"
+ENERGY_CONS_API_URL = "https://api.energidataservice.dk/dataset/ConsumptionMunicipalityHour"
 DMI_API_KEY = os.getenv("API_KEY")
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 
@@ -180,8 +181,8 @@ def save_dmi_data(year_data, year):
 
 # ============ ENERGY DATA FUNCTIONS ============
 
-def fetch_energy_data(start_date, end_date):
-    """Fetch energy production data (all records in one request)."""
+def fetch_energy_data(url, start_date, end_date):
+    """Fetch energy data (all records in one request)."""
     start_str = start_date.strftime('%Y-%m-%dT%H:%M')
     end_str = end_date.strftime('%Y-%m-%dT%H:%M')
 
@@ -194,7 +195,7 @@ def fetch_energy_data(start_date, end_date):
 
     for attempt in range(MAX_RETRIES):
         try:
-            response = requests.get(ENERGY_API_URL, params=params, timeout=120)
+            response = requests.get(url, params=params, timeout=120)
 
             if response.status_code == 200:
                 data = response.json()
@@ -216,7 +217,7 @@ def fetch_energy_data(start_date, end_date):
 
 
 def fetch_energy_year_data(year, test_mode=False):
-    """Fetch all energy production data for a specific year."""
+    """Fetch all energy production and consumption data for a specific year."""
     start_date = datetime(year, 1, 1)
     if year == datetime.now().year:
         end_date = datetime.now()
@@ -228,43 +229,81 @@ def fetch_energy_year_data(year, test_mode=False):
         print(f"🧪 TEST MODE: Fetching only 1 day of data for {year}")
         end_date = start_date + timedelta(days=1)
 
-    print(f"\n=== Fetching Energy Production Data for {year} ===")
+    print(f"\n=== Fetching Energy Data for {year} ===")
     print(f"Date range: {start_date.date()} to {end_date.date()}")
 
-    result = fetch_energy_data(start_date, end_date)
+    # 1. Fetch Production
+    print("Fetching Production data...")
+    prod_result = fetch_energy_data(ENERGY_PROD_API_URL, start_date, end_date)
+    prod_records = prod_result.get('records', []) if prod_result else []
+    print(f"Fetched {len(prod_records)} production records")
 
-    if not result:
-        print("No energy data returned")
-        return []
+    # 2. Fetch Consumption
+    print("Fetching Consumption data...")
+    cons_result = fetch_energy_data(ENERGY_CONS_API_URL, start_date, end_date)
+    cons_records = cons_result.get('records', []) if cons_result else []
+    print(f"Fetched {len(cons_records)} consumption records")
 
-    records = result.get('records', [])
-    total = result.get('total', len(records))
-
-    print(f"Fetched {len(records)} energy records for {year}")
-    print(f"API reports total: {total}")
-
-    return records
+    return prod_records, cons_records
 
 
-def save_energy_data(year_data, year):
+def save_energy_data(prod_records, cons_records, year):
     """Save energy data for a specific year to Parquet."""
-    if not year_data:
+    if not prod_records and not cons_records:
         print(f"No energy data for {year}, skipping save")
         return None
 
-    df = pd.DataFrame(year_data)
+    # Process Production
+    prod_df = pd.DataFrame(prod_records)
+    if not prod_df.empty:
+        if 'HourUTC' in prod_df.columns:
+            prod_df['timestamp'] = pd.to_datetime(prod_df['HourUTC'])
+        elif 'HourDK' in prod_df.columns:
+            prod_df['timestamp'] = pd.to_datetime(prod_df['HourDK'])
+        
+        # Numeric columns
+        for col in ['ProductionGe100kW', 'ProductionLt100kW', 'SolarMWh', 'OnshoreWindMWh', 'OffshoreWindLt100MW_MWh', 'OffshoreWindGe100MW_MWh', 'ThermalPowerMWh']:
+            if col in prod_df.columns:
+                prod_df[col] = pd.to_numeric(prod_df[col], errors='coerce').fillna(0)
 
-    # Convert timestamp
-    if 'HourUTC' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['HourUTC'])
-    elif 'HourDK' in df.columns:
-        df['timestamp'] = pd.to_datetime(df['HourDK'])
+    # Process Consumption
+    cons_df = pd.DataFrame(cons_records)
+    if not cons_df.empty:
+        if 'HourUTC' in cons_df.columns:
+            cons_df['timestamp'] = pd.to_datetime(cons_df['HourUTC'])
+        elif 'HourDK' in cons_df.columns:
+            cons_df['timestamp'] = pd.to_datetime(cons_df['HourDK'])
+            
+        if 'ConsumptionMWh' in cons_df.columns:
+            cons_df['ConsumptionMWh'] = pd.to_numeric(cons_df['ConsumptionMWh'], errors='coerce').fillna(0)
 
-    # Convert numeric columns
-    numeric_columns = ['ProductionGe100kW', 'ProductionLt100kW', 'Production']
-    for col in numeric_columns:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
+    # Merge
+    print("Merging production and consumption...")
+    if not prod_df.empty and not cons_df.empty:
+        # Ensure MunicipalityNo is consistent type
+        prod_df['MunicipalityNo'] = prod_df['MunicipalityNo'].astype(str)
+        cons_df['MunicipalityNo'] = cons_df['MunicipalityNo'].astype(str)
+        
+        # Merge on Municipality and Timestamp
+        # Note: We use outer join to keep all data
+        df = pd.merge(
+            prod_df, 
+            cons_df[['MunicipalityNo', 'timestamp', 'ConsumptionMWh']], 
+            on=['MunicipalityNo', 'timestamp'], 
+            how='outer'
+        )
+    elif not prod_df.empty:
+        df = prod_df
+        df['ConsumptionMWh'] = 0
+    else:
+        df = cons_df
+        df['ConsumptionMWh'] = df['ConsumptionMWh'] # already there
+        # Add missing production cols
+        for col in ['SolarMWh', 'OnshoreWindMWh', 'OffshoreWindLt100MW_MWh', 'OffshoreWindGe100MW_MWh', 'ThermalPowerMWh']:
+            df[col] = 0
+
+    # Fill NaNs
+    df = df.fillna(0)
 
     # Add derived date columns
     df['date'] = df['timestamp'].dt.date
@@ -284,7 +323,7 @@ def save_energy_data(year_data, year):
 
     # Save to Parquet
     os.makedirs(DATA_DIR, exist_ok=True)
-    output_file = os.path.join(DATA_DIR, f"energy_production_{year}.parquet")
+    output_file = os.path.join(DATA_DIR, f"energy_data_{year}.parquet")
     df.to_parquet(output_file, engine="pyarrow", compression="snappy", index=False)
 
     file_size = os.path.getsize(output_file)
@@ -318,11 +357,11 @@ def main():
     # Check for test mode
     test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
 
-    print(f"🚀 KUBERNETES WORKER - YEAR {year}")
+    print(f" KUBERNETES WORKER - YEAR {year}")
     print(f"Data directory: {DATA_DIR}")
     print(f"Worker pod: {os.getenv('HOSTNAME', 'unknown')}")
     if test_mode:
-        print("🧪 RUNNING IN TEST MODE (1 day of data)")
+        print(" RUNNING IN TEST MODE (1 day of data)")
 
     # Fetch DMI weather data
     try:
@@ -331,14 +370,14 @@ def main():
     except Exception as e:
         print(f"Error fetching DMI data: {e}")
 
-    # Fetch Energy production data
+    # Fetch Energy data
     try:
-        energy_records = fetch_energy_year_data(year, test_mode)
-        save_energy_data(energy_records, year)
+        prod_records, cons_records = fetch_energy_year_data(year, test_mode)
+        save_energy_data(prod_records, cons_records, year)
     except Exception as e:
         print(f"Error fetching energy data: {e}")
 
-    print(f"\n✅ Worker completed for year {year}!")
+    print(f"\n Worker completed for year {year}!")
 
 
 if __name__ == "__main__":

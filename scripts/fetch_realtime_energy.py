@@ -13,30 +13,31 @@ import requests
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 from kafka import KafkaProducer
-from kafka.errors import KafkaError
+from kafka.errors import NoBrokersAvailable
 
 # Configuration
 ENERGINET_API_URL = "https://api.energidataservice.dk/dataset"
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "energy_actual")
-FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "600"))  # 10 minutes default
+FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "600"))  # 10 minutes
 
-# Kafka Producer
 producer = None
 
-def fetch_production_actual(days_back=3):
-    """Fetch actual production data from Energinet (3 days back due to data delay)"""
-    # Use timezone-aware UTC
+def fetch_realtime_energy(days_back=3):
+    """
+    Fetch 5-minute resolution real-time data and aggregate to hourly.
+    Dataset: ElectricityProdex5MinRealtime
+    Contains: Production, Consumption (derived), and Exchange by PriceArea.
+    """
     end_time = datetime.now(timezone.utc) - timedelta(days=days_back)
     start_time = end_time - timedelta(hours=24)
 
-    # Production by municipality
-    # Changed from ProductionConsumptionSettlement to ProductionMunicipalityHour
-    url = f"{ENERGINET_API_URL}/ProductionMunicipalityHour"
+    url = f"{ENERGINET_API_URL}/ElectricityProdex5MinRealtime"
+
     params = {
         'start': start_time.strftime('%Y-%m-%dT%H:00'),
         'end': end_time.strftime('%Y-%m-%dT%H:00'),
-        'sort': 'HourUTC DESC',
+        'sort': 'Minutes5UTC DESC',
         'limit': 10000
     }
 
@@ -46,153 +47,153 @@ def fetch_production_actual(days_back=3):
         data = response.json()
         records = data.get('records', [])
 
-        if records:
-            df = pd.DataFrame(records)
-            return df
-        return None
-    except Exception as e:
-        print(f"  ✗ Error fetching production data: {e}")
-        return None
+        if not records:
+            return None
 
-def fetch_consumption_actual(days_back=3):
-    """Fetch actual consumption data from Energinet (3 days back due to data delay)"""
-    # Use timezone-aware UTC
-    end_time = datetime.now(timezone.utc) - timedelta(days=days_back)
-    start_time = end_time - timedelta(hours=24)
+        df = pd.DataFrame(records)
 
-    # Changed from ConsumptionDE35Hour to ConsumptionMunicipalityHour
-    url = f"{ENERGINET_API_URL}/ConsumptionMunicipalityHour"
-    params = {
-        'start': start_time.strftime('%Y-%m-%dT%H:00'),
-        'end': end_time.strftime('%Y-%m-%dT%H:00'),
-        'sort': 'HourUTC DESC',
-        'limit': 10000
-    }
+        # 1. Parse Time
+        df['Minutes5DK'] = pd.to_datetime(df['Minutes5DK'])
 
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        records = data.get('records', [])
+        df['year'] = df['Minutes5DK'].dt.year
+        df['month'] = df['Minutes5DK'].dt.month
+        df['day'] = df['Minutes5DK'].dt.day
+        df['hour'] = df['Minutes5DK'].dt.hour
 
-        if records:
-            df = pd.DataFrame(records)
-            return df
-        return None
-    except Exception as e:
-        print(f"  ✗ Error fetching consumption data: {e}")
-        return None
+        cols_to_clean = [
+            'GrossConMWh', 'SolarPower', 'OnshoreWindPower',
+            'OffshoreWindPower', 'ThermalPower', 'ProductionGe100MW',
+            'ProductionLt100MW'
+        ]
+        for col in cols_to_clean:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            else:
+                df[col] = 0.0
 
-def aggregate_production_by_area(df):
-    """Aggregate production data by DK area and hour"""
-    if df is None or df.empty:
-        return []
-
-    # Parse timestamp and extract components
-    df['HourDK'] = pd.to_datetime(df['HourDK'])
-    df['year'] = df['HourDK'].dt.year
-    df['month'] = df['HourDK'].dt.month
-    df['day'] = df['HourDK'].dt.day
-    df['hour'] = df['HourDK'].dt.hour
-
-    # Map municipality to DK area (municipality < 400 = DK1, >= 400 = DK2)
-    df['MunicipalityNo'] = pd.to_numeric(df['MunicipalityNo'], errors='coerce')
-    df['dk_area'] = df['MunicipalityNo'].apply(lambda x: 'DK1' if x < 400 else 'DK2')
-
-    # Calculate total production
-    production_cols = ['SolarMWh', 'OffshoreWindLt100MW_MWh', 'OffshoreWindGe100MW_MWh',
-                      'OnshoreWindMWh', 'ThermalPowerMWh']
-
-    for col in production_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    df['total_production_mwh'] = sum(df[col] for col in production_cols if col in df.columns)
-
-    # Group by area and hour
-    grouped = df.groupby(['dk_area', 'year', 'month', 'day', 'hour']).agg({
-        'total_production_mwh': 'sum',
-        'SolarMWh': 'sum',
-        'OnshoreWindMWh': 'sum',
-        'OffshoreWindLt100MW_MWh': 'sum',
-        'OffshoreWindGe100MW_MWh': 'sum'
-    }).reset_index()
-
-    return grouped.to_dict('records')
-
-def aggregate_consumption_by_area(df):
-    """Aggregate consumption data by DK area and hour"""
-    if df is None or df.empty:
-        return []
-
-    # Parse timestamp
-    df['HourDK'] = pd.to_datetime(df['HourDK'])
-    df['year'] = df['HourDK'].dt.year
-    df['month'] = df['HourDK'].dt.month
-    df['day'] = df['HourDK'].dt.day
-    df['hour'] = df['HourDK'].dt.hour
-
-    # Map municipality to DK area (municipality < 400 = DK1, >= 400 = DK2)
-    df['MunicipalityNo'] = pd.to_numeric(df['MunicipalityNo'], errors='coerce')
-    df['dk_area'] = df['MunicipalityNo'].apply(lambda x: 'DK1' if x < 400 else 'DK2')
-    
-    df['ConsumptionkWh'] = pd.to_numeric(df['ConsumptionkWh'], errors='coerce').fillna(0)
-    # Convert kWh to MWh
-    df['total_consumption_mwh'] = df['ConsumptionkWh'] / 1000.0
-
-    # Group by area and hour
-    grouped = df.groupby(['dk_area', 'year', 'month', 'day', 'hour']).agg({
-        'total_consumption_mwh': 'sum'
-    }).reset_index()
-
-    return grouped.to_dict('records')
-
-def combine_production_consumption(prod_records, cons_records):
-    """Combine production and consumption into unified records"""
-    # Convert to DataFrames for easier merging
-    if not prod_records and not cons_records:
-        return []
-
-    prod_df = pd.DataFrame(prod_records) if prod_records else pd.DataFrame()
-    cons_df = pd.DataFrame(cons_records) if cons_records else pd.DataFrame()
-
-    # Merge on dk_area, year, month, day, hour
-    if not prod_df.empty and not cons_df.empty:
-        merged = pd.merge(
-            prod_df, cons_df,
-            on=['dk_area', 'year', 'month', 'day', 'hour'],
-            how='outer'
+        df['total_production_mwh'] = (
+                df['SolarPower'] +
+                df['OnshoreWindPower'] +
+                df['OffshoreWindPower'] +
+                df['ProductionGe100MW'] +
+                df['ProductionLt100MW']
         )
-    elif not prod_df.empty:
-        merged = prod_df
-        merged['total_consumption_mwh'] = None
-    elif not cons_df.empty:
-        merged = cons_df
-        merged['total_production_mwh'] = None
-    else:
-        return []
 
-    # Fill NaN values
-    merged = merged.fillna({
-        'total_production_mwh': 0,
-        'total_consumption_mwh': 0,
-        'SolarMWh': 0,
-        'OnshoreWindMWh': 0,
-        'OffshoreWindLt100MW_MWh': 0,
-        'OffshoreWindGe100MW_MWh': 0
-    })
 
-    # Convert to int where appropriate
-    for col in ['year', 'month', 'day', 'hour']:
-        merged[col] = merged[col].astype(int)
+        if 'GrossConMWh' not in df.columns:
+             df['total_consumption_mwh'] = 0
+        else:
+             df['total_consumption_mwh'] = df['GrossConMWh']
 
-    # Add timestamp
-    merged['timestamp'] = datetime.now(timezone.utc).isoformat()
 
-    # Calculate net balance
-    merged['net_balance_mwh'] = merged['total_production_mwh'] - merged['total_consumption_mwh']
+        
+        cols_exchange = [
+            'ExchangeNO_DK1', 'ExchangeSE_DK1', 'ExchangeDE_DK1', 'ExchangeNL_DK1', 'ExchangeDK1_DK2',
+            'ExchangeSE_DK2', 'ExchangeDE_DK2', 'ExchangeDK2_Bornholm'
+        ]
+        
+        for col in cols_exchange:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            else:
+                df[col] = 0.0
+                
 
-    return merged.to_dict('records')
+        
+        grouped = df.groupby(['PriceArea', 'year', 'month', 'day', 'hour']).agg({
+            'total_production_mwh': 'mean',
+            'total_consumption_mwh': 'mean',
+            'SolarPower': 'mean',
+            'OnshoreWindPower': 'mean',
+            'OffshoreWindPower': 'mean',
+            'ExchangeNO_DK1': 'mean',
+            'ExchangeSE_DK1': 'mean',
+            'ExchangeDE_DK1': 'mean',
+            'ExchangeNL_DK1': 'mean',
+            'ExchangeDK1_DK2': 'mean',
+            'ExchangeSE_DK2': 'mean',
+            'ExchangeDE_DK2': 'mean',
+            'ExchangeDK2_Bornholm': 'mean'
+        }).reset_index()
+
+        grouped = grouped.rename(columns={'PriceArea': 'dk_area'})
+
+        grouped = grouped[grouped['dk_area'].isin(['DK1', 'DK2'])]
+
+        def calculate_consumption(row):
+            if row['total_consumption_mwh'] > 0:
+                return row['total_consumption_mwh']
+            
+            # Fallback calculation
+            # Consumption = Production + NetImport
+            
+            net_import = 0
+            if row['dk_area'] == 'DK1':
+                # Positive is import to DK1
+                net_import = (
+                    row['ExchangeNO_DK1'] + 
+                    row['ExchangeSE_DK1'] + 
+                    row['ExchangeDE_DK1'] + 
+                    row['ExchangeNL_DK1'] - 
+                    row['ExchangeDK1_DK2']
+                )
+            elif row['dk_area'] == 'DK2':
+                # Positive ExchangeDK1_DK2 is import to DK2
+                # Positive ExchangeSE_DK2 is import to DK2
+                # Positive ExchangeDE_DK2 is import to DK2
+                # ExchangeDK2_Bornholm: usually ignored or small, but let's assume positive is export to Bornholm
+                net_import = (
+                    row['ExchangeSE_DK2'] + 
+                    row['ExchangeDE_DK2'] + 
+                    row['ExchangeDK1_DK2'] -
+                    row['ExchangeDK2_Bornholm']
+                )
+            
+            # Consumption = Production + NetImport
+            # If NetImport is negative (NetExport), Consumption = Production - NetExport
+            return row['total_production_mwh'] + net_import
+
+        grouped['calculated_consumption'] = grouped.apply(calculate_consumption, axis=1)
+        
+        # Use calculated consumption if original is 0
+        grouped['total_consumption_mwh'] = grouped.apply(
+            lambda x: x['calculated_consumption'] if x['total_consumption_mwh'] == 0 else x['total_consumption_mwh'], 
+            axis=1
+        )
+        
+        # Ensure non-negative
+        grouped['total_consumption_mwh'] = grouped['total_consumption_mwh'].clip(lower=0)
+
+        # Recalculate Net Balance
+        grouped['net_balance_mwh'] = grouped['total_production_mwh'] - grouped['total_consumption_mwh']
+
+        # 10. Add Timestamp
+        grouped['timestamp'] = pd.to_datetime(grouped[['year', 'month', 'day', 'hour']])
+        grouped['timestamp'] = grouped['timestamp'].dt.strftime('%Y-%m-%dT%H:%M:%S')
+
+        return grouped.to_dict('records')
+
+    except Exception as e:
+        print(f"  Error fetching real-time data: {e}")
+        return None
+
+def get_kafka_producer():
+    global producer
+    if producer is not None:
+        return producer
+    
+    try:
+        print(f"   Connecting to Kafka at {KAFKA_BOOTSTRAP_SERVERS}...")
+        producer = KafkaProducer(
+            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+            value_serializer=lambda v: json.dumps(v, default=str).encode('utf-8'),
+            key_serializer=lambda k: k.encode('utf-8') if k else None
+        )
+        print(f"   Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+        return producer
+    except Exception as e:
+        print(f"   Failed to connect to Kafka: {e}")
+        return None
 
 def send_to_kafka(records):
     """Send actual energy records to Kafka"""
@@ -201,86 +202,56 @@ def send_to_kafka(records):
     if not records:
         return False
 
-    if producer is None:
-        try:
-            producer = KafkaProducer(
-                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                value_serializer=lambda v: json.dumps(v, default=str).encode('utf-8'),
-                key_serializer=lambda k: k.encode('utf-8') if k else None
-            )
-            print(f"  ✓ Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
-        except Exception as e:
-            print(f"  ✗ Failed to connect to Kafka: {e}")
-            return False
+    prod = get_kafka_producer()
+    if prod is None:
+        return False
 
     try:
+        count = 0
         for record in records:
             key = f"{record['dk_area']}_{record['year']}_{record['month']}_{record['day']}_{record['hour']}"
-            future = producer.send(KAFKA_TOPIC, key=key, value=record)
-            future.get(timeout=10)
+            prod.send(KAFKA_TOPIC, key=key, value=record)
+            count += 1
 
-        producer.flush()
-        print(f"  ✓ Sent {len(records)} actual energy records to Kafka topic '{KAFKA_TOPIC}'")
-        for r in records:
-            print(f"    - {r['dk_area']} {r['year']}-{r['month']:02d}-{r['day']:02d} {r['hour']:02d}:00 | "
-                  f"Prod: {r['total_production_mwh']:,.0f} MWh | "
-                  f"Cons: {r['total_consumption_mwh']:,.0f} MWh | "
-                  f"Net: {r['net_balance_mwh']:+,.0f} MWh")
+        prod.flush()
+        print(f"   Sent {count} records to '{KAFKA_TOPIC}'")
+
+        if records:
+            r = records[0]
+            print(f"    Sample: {r['dk_area']} {r['hour']}:00 | Prod: {r['total_production_mwh']:.0f} | Cons: {r['total_consumption_mwh']:.0f}")
+
         return True
     except Exception as e:
-        print(f"  ✗ Error sending to Kafka: {e}")
+        print(f"   Error sending to Kafka: {e}")
+        # Reset producer to force reconnection next time
+        producer = None
         return False
 
 def main():
-    """Main loop"""
-    print(f"⚡ Real-time Actual Energy Data Fetcher")
-    print(f"   Kafka Topic: {KAFKA_TOPIC}")
-    print(f"   Fetch Interval: {FETCH_INTERVAL}s ({FETCH_INTERVAL/3600:.1f}h)")
-    print(f"   Data Delay: 3 days (Energinet reporting lag)")
-    print(f"{'='*70}\n")
+    print(f" Real-time Actual Energy Data Fetcher (ProdEx5Min)")
+    print(f"   Topic: {KAFKA_TOPIC}")
 
     iteration = 0
     while True:
         iteration += 1
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iteration {iteration}")
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Iteration {iteration}")
 
-        # Fetch production data (3 days back due to Energinet data delay)
-        print("  Fetching production data from Energinet (3 days back)...")
-        prod_df = fetch_production_actual(days_back=3)
+        print("  Fetching real-time data (ElectricityProdex5MinRealtime)...")
+        records = fetch_realtime_energy(days_back=0) # Changed to 0 to get current data
 
-        # Fetch consumption data (3 days back due to Energinet data delay)
-        print("  Fetching consumption data from Energinet (3 days back)...")
-        cons_df = fetch_consumption_actual(days_back=3)
-
-        # Aggregate by DK area
-        prod_records = aggregate_production_by_area(prod_df) if prod_df is not None else []
-        cons_records = aggregate_consumption_by_area(cons_df) if cons_df is not None else []
-
-        print(f"  Aggregated: {len(prod_records)} production records, {len(cons_records)} consumption records")
-
-        # Combine production and consumption
-        combined_records = combine_production_consumption(prod_records, cons_records)
-
-        if combined_records:
-            print(f"  Combined: {len(combined_records)} unified records")
-            send_to_kafka(combined_records)
+        success = False
+        if records:
+            success = send_to_kafka(records)
         else:
-            print(f"  ✗ No data available")
+            print("   No data found")
+            success = True
 
-        # Wait for next interval
-        print(f"\n  Sleeping for {FETCH_INTERVAL}s...\n")
-        time.sleep(FETCH_INTERVAL)
+        if success:
+            print(f"  Sleeping {FETCH_INTERVAL}s...")
+            time.sleep(FETCH_INTERVAL)
+        else:
+            print("  Failed to send to Kafka. Retrying in 10s...")
+            time.sleep(10)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\n\n⏹️  Shutting down fetcher...")
-        if producer:
-            producer.close()
-        sys.exit(0)
-    except Exception as e:
-        print(f"\n❌ Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    main()

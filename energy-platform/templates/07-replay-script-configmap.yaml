@@ -144,7 +144,13 @@ data:
                         if 'PriceArea' in record:
                             record['dk_area'] = record['PriceArea']
                         elif 'MunicipalityNo' in record:
-                            record['dk_area'] = record['MunicipalityNo']
+                            # Map municipality to DK1/DK2
+                            # Simple heuristic: < 400 is DK1, >= 400 is DK2
+                            try:
+                                muni = int(record['MunicipalityNo'])
+                                record['dk_area'] = 'DK1' if muni < 400 else 'DK2'
+                            except:
+                                record['dk_area'] = 'Unknown'
 
                     # 2. Calculate Total Production (Transformation)
                     if 'total_production_mwh' not in record:
@@ -159,6 +165,12 @@ data:
                     if 'total_consumption_mwh' not in record:
                         if 'GrossConsumptionMWh' in record:
                             record['total_consumption_mwh'] = record['GrossConsumptionMWh']
+                        elif 'ConsumptionMWh' in record:
+                            record['total_consumption_mwh'] = record['ConsumptionMWh']
+                        elif 'Consumption' in record:
+                            record['total_consumption_mwh'] = record['Consumption']
+                        else:
+                            record['total_consumption_mwh'] = 0.0
 
                     if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
                         record['timestamp'] = record['timestamp'].isoformat()

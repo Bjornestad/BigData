@@ -46,10 +46,10 @@ def fetch_production_data(start_date, end_date):
             response.raise_for_status()
             data = response.json()
             records = data.get('records', [])
-            print(f"  ✓ Fetched {len(records):,} production records")
+            print(f"  Fetched {len(records):,} production records")
             return pd.DataFrame(records)
         except Exception as e:
-            print(f"  ✗ Attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
+            print(f"  Attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(2 ** attempt)
             else:
@@ -79,10 +79,10 @@ def fetch_consumption_data(start_date, end_date):
             response.raise_for_status()
             data = response.json()
             records = data.get('records', [])
-            print(f"  ✓ Fetched {len(records):,} consumption records")
+            print(f"  Fetched {len(records):,} consumption records")
             return pd.DataFrame(records)
         except Exception as e:
-            print(f"  ✗ Attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
+            print(f"  Attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(2 ** attempt)
             else:
@@ -130,7 +130,7 @@ def process_production_data(df):
         'OffshoreWindGe100MW_MWh': 'sum'
     }).reset_index()
 
-    print(f"  ✓ Aggregated to {len(grouped):,} hourly records")
+    print(f"  Aggregated to {len(grouped):,} hourly records")
     return grouped
 
 
@@ -169,7 +169,7 @@ def combine_production_consumption(prod_df, cons_df):
     print(f"\n  Combining production and consumption...")
 
     if prod_df.empty and cons_df.empty:
-        print("  ✗ No data to combine")
+        print("  No data to combine")
         return pd.DataFrame()
 
     # Merge on dk_area, year, month, day, hour
@@ -227,7 +227,7 @@ def combine_production_consumption(prod_df, cons_df):
 
 def main():
     """Main function"""
-    print("⚡ Historical Energy Data Fetcher")
+    print("Historical Energy Data Fetcher")
     print(f"   Date Range: {START_DATE.date()} to {END_DATE.date()}")
     print(f"   Production Source: ProductionConsumptionSettlement")
     print(f"   Consumption Source: ConsumptionDE35Hour")

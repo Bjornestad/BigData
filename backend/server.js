@@ -35,6 +35,14 @@ const consumer = kafka.consumer({ groupId: CONSUMER_GROUP });
 let pool = null;
 if (DATABASE_URL) {
   try {
+    // Log masked URL for debugging
+    try {
+      const maskedUrl = DATABASE_URL.replace(/:([^:@]+)@/, ':****@');
+      console.log(`Initializing database connection with: ${maskedUrl}`);
+    } catch (e) {
+      console.log('Initializing database connection (could not mask URL)');
+    }
+
     console.log('Initializing database connection...');
     // Manually parse the URL to avoid issues with pg-connection-string
     const dbUrl = new URL(DATABASE_URL);
@@ -49,6 +57,8 @@ if (DATABASE_URL) {
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
     };
+
+    console.log('DB Config (password masked):', { ...config, password: '****' });
 
     pool = new Pool(config);
 
@@ -68,13 +78,9 @@ if (DATABASE_URL) {
     });
   } catch (error) {
     console.error('Error initializing database pool:', error);
-    // Fallback
-    pool = new Pool({
-      connectionString: DATABASE_URL,
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000,
-    });
+    console.error('Invalid DATABASE_URL format or connection error. Historical data will be unavailable.');
+    // Do NOT fallback to connectionString if manual parsing failed, as it likely means the URL is malformed
+    pool = null;
   }
 } else {
   console.warn('DATABASE_URL not set - historical queries disabled');

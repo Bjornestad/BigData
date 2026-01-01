@@ -7,8 +7,8 @@ const { Pool } = require('pg');
 
 // Configuration from environment variables
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
-const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'power-consumption-actual';
-const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'power-consumption-predicted';
+const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'energy_actual';
+const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'energy_predictions';
 const PORT = process.env.PORT || 8080;
 const CONSUMER_GROUP = process.env.CONSUMER_GROUP || 'power-grid-monitor';
 const DATABASE_URL = process.env.DATABASE_URL;

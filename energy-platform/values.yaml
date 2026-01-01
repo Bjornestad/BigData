@@ -2,13 +2,13 @@ backend:
   image:
     repository: dummystad/bigdata
     tag: backend-latest
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
 
 database_writer:
   image:
     repository: dummystad/bigdata
     tag: database-writer-latest
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
 
 timescaledb:
   user: postgres

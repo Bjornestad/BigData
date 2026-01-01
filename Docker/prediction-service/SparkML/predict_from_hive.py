@@ -60,25 +60,25 @@ try:
     spark.sql("SHOW DATABASES").show()
     print("Checking Hive tables in default...")
     spark.sql("SHOW TABLES IN default").show()
-    print("✓ Hive connection established")
+    print(" Hive connection established")
 except Exception as e:
-    print(f"✗ Failed to connect to Hive: {e}")
+    print(f" Failed to connect to Hive: {e}")
     sys.exit(1)
 
 # Load models
 print("\nLoading ML models...")
 try:
     production_model = PipelineModel.load(PRODUCTION_MODEL_PATH)
-    print(f"  ✓ Production model loaded")
+    print(f"   Production model loaded")
 except Exception as e:
-    print(f"  ✗ Failed to load production model: {e}")
+    print(f"   Failed to load production model: {e}")
     sys.exit(1)
 
 try:
     consumption_model = PipelineModel.load(CONSUMPTION_MODEL_PATH)
-    print(f"  ✓ Consumption model loaded")
+    print(f"   Consumption model loaded")
 except Exception as e:
-    print(f"  ✗ Failed to load consumption model: {e}")
+    print(f"   Failed to load consumption model: {e}")
     sys.exit(1)
 
 # Initialize Kafka producer
@@ -118,16 +118,16 @@ def get_latest_weather_from_hive():
         latest_df = spark.sql(query)
 
         if latest_df.count() == 0:
-            print("  ⚠️  No data in Hive table yet")
+            print("   No data in Hive table yet")
             return None
 
         count = latest_df.count()
         if count == 0:
-            print("  ⚠️  No weather data available")
+            print("   No weather data available")
             return None
 
         # Show what we found
-        print(f"  ✓ Found {count} latest weather records")
+        print(f"  Found {count} latest weather records")
         latest_df.select("dk_area", "year", "month", "day", "hour", "wind_speed_avg").show()
 
         # Add derived features needed by ML model
@@ -137,7 +137,7 @@ def get_latest_weather_from_hive():
         return latest_df
 
     except Exception as e:
-        print(f"  ✗ Error reading from Hive/HDFS: {e}")
+        print(f"  Error reading from Hive/HDFS: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -164,7 +164,7 @@ def make_predictions(weather_df):
             hour_key = f"{dk_area}_{year}_{month}_{day}_{hour}"
 
             if hour_key in processed_hours:
-                print(f"  ⏭️  Already processed {hour_key}, skipping")
+                print(f"  Already processed {hour_key}, skipping")
                 continue
 
             # Convert row to DataFrame for prediction
@@ -277,9 +277,9 @@ try:
         time.sleep(CHECK_INTERVAL)
 
 except KeyboardInterrupt:
-    print("\n\n⏹️  Shutting down prediction service...")
+    print("\n\n  Shutting down prediction service...")
 except Exception as e:
-    print(f"\n❌ Fatal error: {e}")
+    print(f"\n Fatal error: {e}")
     import traceback
     traceback.print_exc()
 finally:
@@ -287,4 +287,4 @@ finally:
         producer.close()
     if 'spark' in globals():
         spark.stop()
-    print("✓ Service stopped")
+    print(" Service stopped")

@@ -71,8 +71,15 @@ let stats = {
 async function flushBatch() {
   if (batch.length === 0) return;
   
-  const batchToFlush = [...batch];
-  batch = [];
+  // Deduplicate batch: keep only the last entry for each (time, type) pair
+  const uniqueEntries = new Map();
+  batch.forEach(item => {
+    const key = `${item.time}_${item.type}`;
+    uniqueEntries.set(key, item);
+  });
+
+  const batchToFlush = Array.from(uniqueEntries.values());
+  batch = []; // Clear the original batch
   
   const startTime = Date.now();
   
@@ -111,6 +118,7 @@ async function flushBatch() {
     stats.errors += 1;
     
     // Re-add to batch for retry (optional - implement dead letter queue for production)
+    // Note: We re-add the deduplicated batch to avoid infinite loops with duplicates
     batch = [...batchToFlush, ...batch];
     
     // If batch is too large after error, drop oldest records
@@ -148,11 +156,23 @@ async function setupKafka() {
         try {
           const value = JSON.parse(message.value.toString());
           const type = topic.includes('actual') ? 'actual' : 'predicted';
-          
+
+          // Extract value based on message structure
+          let numericValue = 0;
+          if (value.value !== undefined) {
+            numericValue = parseFloat(value.value);
+          } else if (value.total_consumption_mwh !== undefined) {
+            numericValue = parseFloat(value.total_consumption_mwh);
+          } else if (value.total_production_mwh !== undefined) {
+            numericValue = parseFloat(value.total_production_mwh);
+          } else if (value.predictions && value.predictions.consumption_mwh !== undefined) {
+             numericValue = parseFloat(value.predictions.consumption_mwh);
+          }
+
           // Add to batch
           batch.push({
             time: value.timestamp || new Date().toISOString(),
-            value: parseFloat(value.value),
+            value: numericValue,
             type: type
           });
           
