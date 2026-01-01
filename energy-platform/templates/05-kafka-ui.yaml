@@ -18,6 +18,8 @@ spec:
           ports:
             - containerPort: 8090
           env:
+            - name: SERVER_PORT
+              value: "8090"
             - name: KAFKA_CLUSTERS_0_NAME
               value: "energy-cluster"
             - name: KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS
@@ -35,6 +37,7 @@ metadata:
   name: kafka-ui
 spec:
   ports:
-    - port: 8080
+    - port: 8090
+      targetPort: 8090
   selector:
     app: kafka-ui

@@ -10,7 +10,7 @@ import sys
 import time
 import json
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import numpy as np
 from kafka import KafkaProducer
@@ -69,7 +69,7 @@ SOLAR_PARAMS = ["radia_glob_past1h", "sun_last1h_glob", "cloud_cover"]
 
 def fetch_station_data(station_id, hours_back=1):
     """Fetch weather data for a single station"""
-    end_time = datetime.utcnow()
+    end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(hours=hours_back)
 
     params = {
@@ -152,8 +152,8 @@ def aggregate_to_dk_area_hourly(all_station_data):
         }
 
         # Count stations contributing to each metric
-        record['n_stations_wind'] = int(group_df['wind_speed'].notna().sum())
-        record['n_stations_solar'] = int(group_df['radia_glob_past1h'].notna().sum())
+        record['n_stations_wind'] = int(group_df['wind_speed'].notna().sum()) if 'wind_speed' in group_df.columns else 0
+        record['n_stations_solar'] = int(group_df['radia_glob_past1h'].notna().sum()) if 'radia_glob_past1h' in group_df.columns else 0
 
         # Wind metrics (mean across stations) - matching historical table schema
         record['wind_speed_mean_area'] = group_df['wind_speed'].mean() if 'wind_speed' in group_df.columns else None
