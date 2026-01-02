@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: bd-bd-gr-08
+  labels:
+    app: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: node:18-slim
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -e
+            echo "Installing dependencies..."
+            cd /app/frontend
+            npm install
+
+            echo "Installing serve for static file serving..."
+            npm install -g serve
+
+            echo "Building React app with backend URL..."
+            export REACT_APP_BACKEND_URL="ws://backend-service:8080"
+            npm run build
+
+            echo "Starting frontend server..."
+            serve -s build -l 80
+        ports:
+        - containerPort: 80
+          name: http
+        volumeMounts:
+        - name: code
+          mountPath: /app
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 90
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+      volumes:
+      - name: code
+        persistentVolumeClaim:
+          claimName: weather-data-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: bd-bd-gr-08
+  labels:
+    app: frontend
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http
+  selector:
+    app: frontend

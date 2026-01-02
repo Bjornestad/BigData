@@ -1,7 +1,7 @@
 # Real-Time Energy Prediction System
-**Danish Weather & Energy Data Pipeline with Machine Learning**
+**Danish Weather & Energy Data Pipeline with 10-Minute ML Predictions**
 
-A complete real-time system that fetches weather and energy data, trains ML models, and generates hourly energy production/consumption predictions for Denmark's DK1 and DK2 price areas.
+A complete real-time system that fetches weather and energy data every 10 minutes, trains ML models, and generates energy consumption predictions for Denmark's DK1 and DK2 price areas.
 
 ---
 
@@ -12,55 +12,52 @@ A complete real-time system that fetches weather and energy data, trains ML mode
 │                        DATA SOURCES                                  │
 ├─────────────────────────────────────────────────────────────────────┤
 │  DMI Weather API          │      Energinet API                      │
-│  (141 stations)           │      (Production & Consumption)         │
+│  (141 stations)           │      (Consumption Data)                 │
 └────────┬──────────────────┴──────────────┬───────────────────────────┘
          │                                 │
          v                                 v
 ┌─────────────────────┐          ┌──────────────────────────┐
 │ Weather Fetcher     │          │ Energy Actual Fetcher    │
-│ (hourly, 141 stn)   │          │ (hourly, 3-day lag)      │
+│ (every 10min)       │          │ (hourly, 3-day lag)      │
 └────────┬────────────┘          └────────┬─────────────────┘
          │                                │
          v                                v
 ┌─────────────────────────────────────────────────────────────────────┐
-│                          KAFKA TOPICS                                │
+│                     KAFKA + SCHEMA REGISTRY                          │
 ├─────────────────────────────────────────────────────────────────────┤
-│  weather_hourly_ml        │      energy_actual                      │
+│  weather_raw (Avro)       │      energy_actual                      │
 └────────┬──────────────────┴──────────────┬───────────────────────────┘
          │                                 │
          v                                 v
 ┌────────────────┐                  ┌─────────────┐
 │ Kafka Connect  │                  │ Kafka       │
-│ HDFS Sinks     │                  │ Connect     │
+│ HDFS Sink      │                  │ Connect     │
 └────────┬───────┘                  └──────┬──────┘
          v                                 v
 ┌────────────────┐                  ┌─────────────┐
-│ HDFS           │                  │ HDFS        │
-│ (JSON files)   │                  │ (archive)   │
+│ HDFS/Hive      │                  │ HDFS        │
+│ (Parquet)      │                  │ (archive)   │
 └────────┬───────┘                  └─────────────┘
          v
-┌────────────────┐
-│ Hive Tables    │
-│ (external)     │
-└────────┬───────┘
-         v
-┌─────────────────────┐
-│ Prediction Service  │
-│ (SparkML, Hive)     │
-└────────┬────────────┘
+┌──────────────────────────────┐
+│ Aggregate & Predict Service  │
+│ (PySpark 4.1.0, Hive)        │
+│ - Aggregates 10-min buckets  │
+│ - Runs ML predictions        │
+└────────┬─────────────────────┘
          │
          v
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    KAFKA OUTPUT TOPIC                                │
 ├─────────────────────────────────────────────────────────────────────┤
-│  energy_predictions (ML predictions)                                 │
+│  energy_predictions (6 predictions/hour)                             │
 └────────┬────────────────────────────────────────────────────────────┘
          │
          v
 ┌────────────────┐
-│   FRONTEND     │
-│  (Your App)    │
-└────────────────┘
+│ Backend+Frontend│
+│ (WebSocket)     │
+└─────────────────┘
 ```
 
 ---
@@ -69,13 +66,13 @@ A complete real-time system that fetches weather and energy data, trains ML mode
 
 ### Prerequisites
 - Kubernetes cluster with namespace `bd-bd-gr-08`
-- HDFS (NameNode + DataNodes)
-- Hive Metastore
-- Kafka cluster
+- HDFS (NameNode + 3 DataNodes)
+- Hive Metastore + HiveServer2
+- Kafka with Zookeeper
+- Kafka Schema Registry
 - Kafka Connect
-- Python 3.11+ with dependencies
 
-### Step 1: Deploy Infrastructure
+### Deploy Core Infrastructure
 ```bash
 # HDFS
 kubectl apply -f k8s/namenode.yaml
@@ -83,45 +80,43 @@ kubectl apply -f k8s/datanodes.yaml
 
 # Hive
 kubectl apply -f k8s/hive-metastore.yaml
+kubectl apply -f k8s/hive.yaml
 
 # Kafka
-kubectl apply -f k8s/kafka.yaml
 kubectl apply -f k8s/kafka-connect.yaml
+kubectl apply -f k8s/schema-registry.yaml
+kubectl apply -f k8s/redpanda.yaml
+kubectl apply -f k8s/topics.yaml
 ```
 
-### Step 2: Set Up Data Pipeline
+### Deploy Real-Time Services
 ```bash
-# Configure Kafka→HDFS connectors
-kubectl apply -f k8s/setup-hdfs-sinks.yaml
-
-# Create Hive tables
-kubectl apply -f k8s/create-realtime-hive-tables.yaml
-kubectl apply -f k8s/create-station-metadata-table.yaml
-kubectl apply -f k8s/create-municipality-metadata-table.yaml
-```
-
-### Step 3: Deploy Real-Time Services
-```bash
-# Weather fetcher (hourly)
+# Weather fetcher (every 10 minutes, publishes Avro to Kafka)
 kubectl apply -f k8s/realtime-weather-fetcher.yaml
 
 # Energy fetcher (hourly, 3-day lag)
 kubectl apply -f k8s/realtime-energy-actual-fetcher.yaml
 
-# Prediction service
-kubectl apply -f k8s/prediction-service-hive.yaml
+# Aggregate & Predict service (aggregates 10-min weather, makes predictions)
+kubectl apply -f k8s/aggregate-and-predict-deployment.yaml
+
+# Backend (WebSocket server)
+kubectl apply -f k8s/backend-deployment-direct.yaml
+
+# Frontend (React UI)
+kubectl apply -f k8s/frontend-deployment-direct.yaml
 ```
 
-### Step 4: Monitor
+### Monitor Services
 ```bash
 # Check all services
-kubectl get pods -n bd-bd-gr-08 | grep -E 'realtime|prediction'
+kubectl get pods -n bd-bd-gr-08
+
+# Watch aggregate & predict service (shows predictions every 10 min)
+kubectl logs -n bd-bd-gr-08 -l app=aggregate-and-predict -f
 
 # Watch weather fetcher
 kubectl logs -n bd-bd-gr-08 -l app=realtime-weather-fetcher -f
-
-# Watch prediction service
-kubectl logs -n bd-bd-gr-08 -l app=prediction-service-hive -f
 ```
 
 ---
@@ -132,79 +127,91 @@ kubectl logs -n bd-bd-gr-08 -l app=prediction-service-hive -f
 BigData/
 ├── README.md                    # This file
 ├── requirements.txt             # Python dependencies
+├── port-forward.sh              # Port forwarding script
+│
+├── docs/                        # Documentation
+│   ├── 10MIN_PREDICTION_SYSTEM.md
+│   ├── COLUMN_SCHEMA.md
+│   ├── MIGRATION_TO_10MIN.md
+│   └── QUICK_START_10MIN.md
 │
 ├── scripts/                     # Data fetching scripts
 │   ├── fetch_historical_weather.py    # Historical weather (2021→now)
 │   ├── fetch_historical_energy.py     # Historical energy (2021→now)
-│   ├── fetch_realtime_weather.py      # Real-time weather → Kafka
+│   ├── fetch_realtime_weather.py      # Real-time weather → Kafka (Avro)
 │   └── fetch_realtime_energy.py       # Real-time energy → Kafka
 │
 ├── SparkML/                     # Machine Learning
-│   ├── train_model.py           # Train Random Forest models
-│   ├── predict_from_hive.py     # Hive-based prediction service
-│   └── models/                  # Trained models directory
-│       ├── energy_model_production_20251227_235847/
-│       └── energy_model_consumption_20251227_235915/
+│   ├── aggregate_and_predict_service.py  # 10-min aggregation + prediction
+│   ├── train_consumption_model.py        # Train Random Forest model
+│   └── models/                           # Trained models directory
+│       └── energy_consumption_model_20251229_173121/
+│
+├── backend/                     # WebSocket backend
+│   ├── server.js               # Node.js WebSocket server
+│   ├── package.json
+│   └── Dockerfile
+│
+├── frontend/                    # React frontend
+│   ├── src/App.js              # React app with real-time chart
+│   ├── package.json
+│   └── Dockerfile
 │
 └── k8s/                         # Kubernetes deployments
-    ├── Infrastructure (5 files)
+    ├── Infrastructure
     │   ├── namenode.yaml
     │   ├── datanodes.yaml
     │   ├── hive-metastore.yaml
-    │   ├── kafka.yaml
-    │   └── kafka-connect.yaml
+    │   ├── hive.yaml
+    │   ├── kafka-connect.yaml
+    │   ├── schema-registry.yaml
+    │   └── redpanda.yaml
     │
-    ├── Production Services (5 files)
-    │   ├── realtime-weather-fetcher.yaml
-    │   ├── realtime-energy-actual-fetcher.yaml
-    │   ├── prediction-service-hive.yaml
-    │   ├── setup-hdfs-sinks.yaml
-    │   └── create-realtime-hive-tables.yaml
-    │
-    └── Metadata (2 files)
-        ├── create-station-metadata-table.yaml
-        └── create-municipality-metadata-table.yaml
+    └── Services
+        ├── realtime-weather-fetcher.yaml
+        ├── realtime-energy-actual-fetcher.yaml
+        ├── aggregate-and-predict-deployment.yaml
+        ├── backend-deployment-direct.yaml
+        └── frontend-deployment-direct.yaml
 ```
 
 ---
 
 ## 🔄 Data Flow
 
-### Historical Data (One-Time Training)
+### Real-Time Pipeline (Every 10 Minutes)
+
 ```
-1. Run fetch_historical_weather.py
-   └─> Output: data/historical_weather_ml.parquet
+1. Weather Fetcher (every 10 min)
+   ├─ Fetches from 141 DMI stations
+   ├─ Converts value field to float
+   └─> Kafka: weather_raw (Avro format)
+        └─> Kafka Connect → HDFS (Parquet) → Hive Table (weather_observations_raw)
 
-2. Run fetch_historical_energy.py
-   └─> Output: data/historical_energy_ml.parquet
-
-3. Load into Hive tables (manually or via job)
-
-4. Train ML models: SparkML/train_model.py
-   └─> Output: SparkML/models/energy_model_production_*
-   └─> Output: SparkML/models/energy_model_consumption_*
-```
-
-### Real-Time Data (Continuous Production)
-```
-Every Hour:
-├─ Weather Fetcher
-│  ├─ Fetch from 141 DMI stations
-│  ├─ Aggregate to DK1/DK2
-│  └─> Kafka: weather_hourly_ml
-│       └─> Kafka Connect → HDFS → Hive Table (weather_wind_solar_area_hourly)
-│
-├─ Energy Fetcher (3 days back due to lag)
-│  ├─ Fetch production (ProductionConsumptionSettlement)
-│  ├─ Fetch consumption (ConsumptionDE35Hour)
-│  └─> Kafka: energy_actual
-│       └─> Kafka Connect → HDFS (archive)
-│
-└─ Prediction Service (checks every 5 min)
-   ├─ Read latest weather from Hive
-   ├─ Run SparkML models
+2. Aggregate & Predict Service (every 10 min, with 30-min delay)
+   ├─ Reads from weather_observations_raw (Hive)
+   ├─ Aggregates last 10-minute bucket (30 min ago) to DK1/DK2
+   ├─ Calculates weather averages (temp, wind, humidity, pressure, etc.)
+   ├─ Writes to weather_area_10min (Hive)
+   ├─ Loads consumption ML model (PySpark 4.1.0)
+   ├─ Makes predictions for DK1 and DK2
    └─> Kafka: energy_predictions
-       └─> Frontend consumes
+        └─> Backend → Frontend (WebSocket)
+
+3. Energy Actual Fetcher (every hour, 3 days back)
+   ├─ Fetches consumption from Energinet
+   └─> Kafka: energy_actual
+        └─> Backend → Frontend (for comparison)
+```
+
+### Prediction Timing Example
+```
+Current time: 02:00
+Latest observation: 02:00
+Aggregate bucket: 01:30 (30 minutes ago)
+  → Aggregates observations from 01:30:00 to 01:39:59
+  → Makes prediction for 01:30
+  → Publishes to Kafka
 ```
 
 ---
@@ -213,190 +220,182 @@ Every Hour:
 
 ### Input Topics
 
-**`weather_hourly_ml`**
+**`weather_raw`** (Avro with Schema Registry)
 - **Source**: Real-time weather fetcher
-- **Frequency**: Hourly
-- **Consumers**: Kafka Connect (→HDFS→Hive), Prediction Service (via Hive)
+- **Frequency**: Every 10 minutes
+- **Consumers**: Kafka Connect → HDFS → Hive
 - **Schema**:
-  - `timestamp`, `dk_area`, `year`, `month`, `day`, `hour`
-  - `wind_speed_mean_area`, `wind_speed_max_area`
-  - `wind_dir_sin_area`, `wind_dir_cos_area`
-  - `radia_glob_past1h_area`, `sun_last1h_glob_area`
-  - `cloud_cover_mean_area`, `temperature_avg`, `humidity_avg`
-  - `n_stations_wind`, `n_stations_solar`
+  - `station_id` (string)
+  - `observed` (string, ISO timestamp)
+  - `parameter_id` (string)
+  - `value` (double)
 
 **`energy_actual`**
 - **Source**: Real-time energy fetcher
-- **Frequency**: Hourly (data is 3 days old due to Energinet lag)
-- **Consumers**: Kafka Connect (→HDFS for archive)
+- **Frequency**: Hourly (data is 3 days old)
 - **Schema**:
   - `timestamp`, `dk_area`, `year`, `month`, `day`, `hour`
-  - `total_production_mwh`, `total_consumption_mwh`
-  - `net_balance_mwh`
-  - `SolarMWh`, `OnshoreWindMWh`, `OffshoreWindLt100MW_MWh`, `OffshoreWindGe100MW_MWh`
+  - `consumption_mwh`
 
 ### Output Topic
 
 **`energy_predictions`**
-- **Source**: Prediction service
-- **Frequency**: Every 5 minutes (when new data detected)
+- **Source**: Aggregate & Predict service
+- **Frequency**: Every 10 minutes (6 predictions/hour)
 - **Format**:
 ```json
 {
-  "timestamp": "2025-12-28T10:05:00.000000",
   "dk_area": "DK1",
-  "year": 2025,
-  "month": 12,
-  "day": 28,
-  "hour": 10,
+  "timestamp": "2026-01-02T01:30:00Z",
+  "year": 2026,
+  "month": 1,
+  "day": 2,
+  "hour": 1,
+  "minute_bucket": 30,
+  "value": 2404.42,
   "predictions": {
-    "production_mwh": 1250.75,
-    "consumption_mwh": 4890.20,
-    "net_balance_mwh": -3639.45
-  }
+    "consumption_mwh": 2404.42,
+    "production_mwh": 0,
+    "net_balance_mwh": 0
+  },
+  "model": "consumption",
+  "prediction_time": "2026-01-02T01:33:45.123456"
 }
 ```
 
 ---
 
-## 🎓 Machine Learning Models
+## 🎓 Machine Learning Model
 
 ### Model Architecture
-- **Algorithm**: Random Forest Regressor
-- **Features**: 10 weather + 2 temporal features
-- **Targets**: Production (MWh), Consumption (MWh)
-- **Training Data**: 86,160 hourly records (2021-2025)
+- **Algorithm**: Random Forest Regressor (PySpark MLlib)
+- **Framework**: PySpark 4.1.0
+- **Features**: 20 weather features + 3 temporal features
+- **Target**: Energy consumption (MWh)
+- **Model Path**: `/app/SparkML/models/energy_consumption_model_20251229_173121`
 
-### Performance Metrics
-
-**Production Model**:
-- R² = 0.76 (76% variance explained)
-- RMSE = 576.51 MWh
-- MAE = 428.70 MWh
-
-**Consumption Model**:
-- R² = 0.89 (89% variance explained)
-- RMSE = 489.04 MWh
-- MAE = 362.22 MWh
+### Pipeline Stages
+1. **Imputer**: Handles missing values (mean imputation)
+2. **VectorAssembler**: Combines 23 features
+3. **StandardScaler**: Normalizes features (mean=0, std=1)
+4. **RandomForestRegressor**: 20 trees
 
 ### Features Used
 
-1. **Weather Features** (10):
-   - `wind_speed_mean_area`, `wind_speed_max_area`
-   - `wind_dir_sin_area`, `wind_dir_cos_area`
-   - `radia_glob_past1h_area`, `sun_last1h_glob_area`
-   - `cloud_cover_mean_area`
-   - `temperature_avg`, `humidity_avg`
-   - `n_stations_wind`, `n_stations_solar`
+**Weather Features (20)**:
+- `temp_mean_area`, `temp_max_area`, `temp_min_area`
+- `temp_grass_mean_area`, `temp_soil_mean_area` (imputed as NULL)
+- `wind_speed_mean_area`, `wind_speed_max_area`
+- `wind_dir_sin_area`, `wind_dir_cos_area`
+- `wind_gust_always_past1h_max_area` (imputed as NULL)
+- `radia_glob_past1h_area`, `sun_last1h_glob_area` (both imputed as NULL)
+- `sun_last10min_glob_area`
+- `precip_past1h_mean_area`, `precip_past10min_mean_area`
+- `humidity_mean_area`
+- `pressure_at_sea_mean_area`
+- `cloud_cover_mean_area`
+- `visibility_mean_area`
+- `n_stations`
 
-2. **Temporal Features** (2):
-   - `month_of_year` (1-12)
-   - `hour_of_day` (0-23)
+**Temporal Features (3)**:
+- `month` (1-12)
+- `day` (1-31)
+- `hour` (0-23)
+
+### Model Behavior
+- Trained on hourly historical data
+- Applied to 10-minute buckets
+- Predictions remain stable within the same hour (expected behavior)
+- Temporal features (month, day, hour) drive most variation
+- Small weather changes within an hour don't significantly affect predictions
 
 ---
 
-## 📦 Data Fetching Scripts
+## 🗄️ Hive Tables
 
-### Historical Scripts (One-Time)
+### `weather_observations_raw`
+- **Source**: Kafka Connect from `weather_raw` topic
+- **Format**: Parquet (partitioned by year/month)
+- **Location**: `/topics/weather_raw/year=*/month=*/`
+- **Schema**: `station_id`, `observed`, `parameter_id`, `value`
+- **Update**: Every 10 minutes via Kafka Connect
 
-**`fetch_historical_weather.py`**
-- Fetches from 141 DMI weather stations (95 DK1, 46 DK2)
-- Date range: 2021-01-01 to present
-- Output: `data/historical_weather_ml.parquet`
-- Runtime: ~30-60 minutes
+### `weather_area_10min`
+- **Purpose**: Aggregated 10-minute weather by DK area
+- **Format**: Parquet (partitioned by year/month)
+- **Schema**: See "Features Used" above + `predicted` flag
+- **Update**: Every 10 minutes by aggregate-and-predict service
+- **Special Column**: `predicted` (0=not predicted, increments when used)
 
-**`fetch_historical_energy.py`**
-- Fetches production and consumption from Energinet
-- Date range: 2021-01-01 to present
-- Output: `data/historical_energy_ml.parquet`
-- Runtime: ~5-10 minutes
-
-### Real-Time Scripts (Continuous)
-
-**`fetch_realtime_weather.py`**
-- Deployed as Kubernetes service
-- Fetches every 1 hour (3600s)
-- Publishes to Kafka topic `weather_hourly_ml`
-- Data flows: Kafka → HDFS → Hive → SparkML
-
-**`fetch_realtime_energy.py`**
-- Deployed as Kubernetes service
-- Fetches every 1 hour (3600s), **from 3 days ago** (Energinet lag)
-- Publishes to Kafka topic `energy_actual`
-- Used for validation and comparison with predictions
+### `predicted_buckets`
+- **Purpose**: Track which buckets have been predicted
+- **Schema**: `dk_area`, `year`, `month`, `day`, `hour`, `minute_bucket`, `predicted_at`
+- **Update**: After each prediction
 
 ---
 
 ## 🚀 Deployment Guide
 
-### Verify Prerequisites
+### Access Frontend
 ```bash
-# Check infrastructure
-kubectl get pods -n bd-bd-gr-08 | grep -E 'kafka|hdfs|hive'
+# Port forward to access locally
+./port-forward.sh
 
-# Should see:
-# - kafka-0, kafka-1, kafka-2
-# - namenode-0, datanode-*
-# - hive-metastore-0
-# - kafka-connect-*
+# Or manually:
+kubectl port-forward -n bd-bd-gr-08 svc/frontend-service 8080:80
+kubectl port-forward -n bd-bd-gr-08 svc/backend-service 8081:8080
+
+# Open browser: http://localhost:8080
 ```
 
-### Check Kafka Connect Sinks
+### View Real-Time Predictions
+The frontend shows a live chart with:
+- Blue line: Actual consumption (3-day delayed data)
+- Green line: Predicted consumption (10-minute updates)
+- Updates automatically via WebSocket
+
+### Check Kafka Topics
 ```bash
-kubectl exec -n bd-bd-gr-08 $(kubectl get pod -n bd-bd-gr-08 -l app=kafka-connect -o name | head -1) -- \
-  curl -s http://localhost:8083/connectors
+# List topics
+kubectl exec -n bd-bd-gr-08 kafka-0 -- sh -c \
+  '/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list'
 
-# Should show:
-# ["hdfs-sink-weather-ml", "hdfs-sink-energy-actual", "hdfs-sink-energy-predictions"]
-```
-
-### Verify Hive Tables
-```bash
-kubectl exec -n bd-bd-gr-08 hive-metastore-0 -- \
-  hive -e "SHOW TABLES;" | grep -E 'weather|energy'
-
-# Should show:
-# weather_wind_solar_area_hourly
-# energy_actual_realtime
-# energy_predictions_realtime_raw
-```
-
-### Deploy Services
-```bash
-# 1. Weather fetcher
-kubectl apply -f k8s/realtime-weather-fetcher.yaml
-kubectl logs -n bd-bd-gr-08 -l app=realtime-weather-fetcher -f
-
-# 2. Energy fetcher
-kubectl apply -f k8s/realtime-energy-actual-fetcher.yaml
-kubectl logs -n bd-bd-gr-08 -l app=realtime-energy-actual-fetcher -f
-
-# 3. Wait 5 minutes for data to flow to Hive
-
-# 4. Prediction service
-kubectl apply -f k8s/prediction-service-hive.yaml
-kubectl logs -n bd-bd-gr-08 -l app=prediction-service-hive -f
-```
-
-### Test End-to-End
-```bash
-# 1. Check weather in Kafka
+# Check weather_raw (Avro - will show binary)
 kubectl exec -n bd-bd-gr-08 kafka-0 -- sh -c \
   '/opt/kafka/bin/kafka-console-consumer.sh \
    --bootstrap-server localhost:9092 \
-   --topic weather_hourly_ml \
+   --topic weather_raw \
    --max-messages 1'
 
-# 2. Check predictions in Kafka
+# Check predictions (JSON)
 kubectl exec -n bd-bd-gr-08 kafka-0 -- sh -c \
   '/opt/kafka/bin/kafka-console-consumer.sh \
    --bootstrap-server localhost:9092 \
    --topic energy_predictions \
-   --max-messages 1'
+   --from-beginning \
+   --max-messages 5'
+```
 
-# 3. Check weather in Hive
-kubectl exec -n bd-bd-gr-08 hive-metastore-0 -- \
-  hive -e "SELECT COUNT(*) FROM weather_wind_solar_area_hourly;"
+### Check Hive Tables
+```bash
+# Count observations
+kubectl exec -n bd-bd-gr-08 namenode-0 -- \
+  beeline -u jdbc:hive2://hiveserver2:10000 \
+  -e "SELECT COUNT(*) FROM weather_observations_raw;"
+
+# View latest 10-min aggregations
+kubectl exec -n bd-bd-gr-08 namenode-0 -- \
+  beeline -u jdbc:hive2://hiveserver2:10000 \
+  -e "SELECT dk_area, hour, minute_bucket, temp_mean_area, wind_speed_mean_area, predicted
+      FROM weather_area_10min
+      WHERE year=2026 AND month=1 AND day=2
+      ORDER BY hour DESC, minute_bucket DESC
+      LIMIT 10;"
+
+# Check predictions tracking
+kubectl exec -n bd-bd-gr-08 namenode-0 -- \
+  beeline -u jdbc:hive2://hiveserver2:10000 \
+  -e "SELECT * FROM predicted_buckets ORDER BY predicted_at DESC LIMIT 10;"
 ```
 
 ---
@@ -405,33 +404,33 @@ kubectl exec -n bd-bd-gr-08 hive-metastore-0 -- \
 
 ### Restart Services
 ```bash
-kubectl rollout restart deployment realtime-weather-fetcher -n bd-bd-gr-08
-kubectl rollout restart deployment realtime-energy-actual-fetcher -n bd-bd-gr-08
-kubectl rollout restart deployment prediction-service-hive -n bd-bd-gr-08
+kubectl rollout restart deployment/realtime-weather-fetcher -n bd-bd-gr-08
+kubectl rollout restart deployment/aggregate-and-predict-service -n bd-bd-gr-08
+kubectl rollout restart deployment/backend -n bd-bd-gr-08
+kubectl rollout restart deployment/frontend -n bd-bd-gr-08
 ```
 
 ### View Logs
 ```bash
+# Aggregate & Predict (shows predictions every 10 min)
+kubectl logs -n bd-bd-gr-08 -l app=aggregate-and-predict -f --tail=100
+
+# Weather Fetcher
 kubectl logs -n bd-bd-gr-08 -l app=realtime-weather-fetcher -f --tail=100
-kubectl logs -n bd-bd-gr-08 -l app=realtime-energy-actual-fetcher -f --tail=100
-kubectl logs -n bd-bd-gr-08 -l app=prediction-service-hive -f --tail=100
+
+# Backend (WebSocket)
+kubectl logs -n bd-bd-gr-08 -l app=backend -f --tail=100
 ```
 
-### Check Data Volume
+### Check HDFS Storage
 ```bash
 # HDFS usage
 kubectl exec -n bd-bd-gr-08 namenode-0 -- \
-  hdfs dfs -du -h /user/hive/warehouse/ | grep -E 'weather|energy'
+  hdfs dfs -du -h /topics/weather_raw/ | head -20
 
-# Hive row counts
-kubectl exec -n bd-bd-gr-08 hive-metastore-0 -- \
-  hive -e "
-  SELECT 'weather', COUNT(*) FROM weather_wind_solar_area_hourly
-  UNION ALL
-  SELECT 'actual', COUNT(*) FROM energy_actual_realtime
-  UNION ALL
-  SELECT 'predictions', COUNT(*) FROM energy_predictions_realtime_raw;
-  "
+# Partition structure
+kubectl exec -n bd-bd-gr-08 namenode-0 -- \
+  hdfs dfs -ls /topics/weather_raw/year=2026/month=1/
 ```
 
 ---
@@ -440,117 +439,56 @@ kubectl exec -n bd-bd-gr-08 hive-metastore-0 -- \
 
 ### No Predictions Generated
 
-**Check 1**: Is weather data in Hive?
+**Check 1**: Is weather data flowing to Kafka?
 ```bash
-kubectl exec -n bd-bd-gr-08 hive-metastore-0 -- \
-  hive -e "SELECT COUNT(*) FROM weather_wind_solar_area_hourly;"
+kubectl logs -n bd-bd-gr-08 -l app=realtime-weather-fetcher --tail=20
+# Should see: "✓ Published 141 weather observations to Kafka"
 ```
-If 0: Check weather fetcher and Kafka Connect
 
-**Check 2**: Are models loaded?
+**Check 2**: Is Kafka Connect writing to HDFS?
 ```bash
-kubectl logs -n bd-bd-gr-08 -l app=prediction-service-hive | grep -i "model loaded"
-# Should show: ✓ Production model loaded, ✓ Consumption model loaded
+kubectl logs -n bd-bd-gr-08 -l app=kafka-connect --tail=50 | grep weather_raw
 ```
 
-**Check 3**: Can prediction service read from Hive?
+**Check 3**: Can aggregate service read from Hive?
 ```bash
-kubectl logs -n bd-bd-gr-08 -l app=prediction-service-hive | grep -A5 "Reading latest"
+kubectl logs -n bd-bd-gr-08 -l app=aggregate-and-predict --tail=50
+# Should see: "✓ Found X new weather records"
 ```
 
-### Kafka Connect Not Writing to HDFS
-
+**Check 4**: Is the model loaded?
 ```bash
-# Check connector status
-kubectl exec -n bd-bd-gr-08 $(kubectl get pod -n bd-bd-gr-08 -l app=kafka-connect -o name | head -1) -- \
-  curl -s http://localhost:8083/connectors/hdfs-sink-weather-ml/status | jq .
-
-# Check for errors
-kubectl logs -n bd-bd-gr-08 -l app=kafka-connect --tail=100 | grep -i error
+kubectl logs -n bd-bd-gr-08 -l app=aggregate-and-predict | grep -i "model"
+# Should see: Model loaded from /app/SparkML/models/...
 ```
 
-### Services Not Starting
+### Avro Deserialization Errors
 
-```bash
-# Check pod status
-kubectl get pods -n bd-bd-gr-08 | grep -E 'realtime|prediction'
+**Symptom**: Redpanda Console shows "issues deserializing the value"
 
-# Describe pod for details
-kubectl describe pod -n bd-bd-gr-08 <pod-name>
-
-# Check events
-kubectl get events -n bd-bd-gr-08 --sort-by='.lastTimestamp'
-```
-
----
-
-## 💻 Frontend Integration
-
-### Consuming Predictions
-
-**JavaScript (KafkaJS)**:
-```javascript
-const { Kafka } = require('kafkajs');
-
-const kafka = new Kafka({
-  brokers: ['kafka-bootstrap:9092']
-});
-
-const consumer = kafka.consumer({ groupId: 'frontend-group' });
-
-await consumer.connect();
-await consumer.subscribe({ topic: 'energy_predictions' });
-
-await consumer.run({
-  eachMessage: async ({ topic, message }) => {
-    const prediction = JSON.parse(message.value.toString());
-    console.log(`${prediction.dk_area} ${prediction.hour}:00`);
-    console.log(`  Production: ${prediction.predictions.production_mwh} MWh`);
-    console.log(`  Consumption: ${prediction.predictions.consumption_mwh} MWh`);
-    console.log(`  Net: ${prediction.predictions.net_balance_mwh} MWh`);
-
-    // Update your UI here
-    updateDashboard(prediction);
-  },
-});
-```
-
-**Python (kafka-python)**:
+**Fix**: Ensure `fetch_realtime_weather.py` converts `value` to float:
 ```python
-from kafka import KafkaConsumer
-import json
-
-consumer = KafkaConsumer(
-    'energy_predictions',
-    bootstrap_servers=['kafka-bootstrap:9092'],
-    value_deserializer=lambda m: json.loads(m.decode('utf-8'))
-)
-
-for message in consumer:
-    prediction = message.value
-    print(f"{prediction['dk_area']} {prediction['hour']}:00")
-    print(f"  Production: {prediction['predictions']['production_mwh']} MWh")
-    print(f"  Consumption: {prediction['predictions']['consumption_mwh']} MWh")
+value = float(props.get('value'))
 ```
 
----
+### Frontend Shows 0 Values
 
-## 📚 Data Sources
+**Check 1**: Are predictions in Kafka?
+```bash
+kubectl exec -n bd-bd-gr-08 kafka-0 -- sh -c \
+  '/opt/kafka/bin/kafka-console-consumer.sh \
+   --bootstrap-server localhost:9092 \
+   --topic energy_predictions \
+   --max-messages 1'
+```
 
-### DMI (Danish Meteorological Institute)
-- **API**: `https://dmigw.govcloud.dk/v2/metObs/collections/observation/items`
-- **Stations**: 141 active stations (95 DK1, 46 DK2)
-- **Parameters**: Wind speed/direction, solar radiation, cloud cover, temperature, humidity
-- **Frequency**: Hourly observations
+**Check 2**: Is backend consuming?
+```bash
+kubectl logs -n bd-bd-gr-08 -l app=backend --tail=50
+```
 
-### Energinet (Danish Energy Data Service)
-- **API**: `https://api.energidataservice.dk/dataset/`
-- **Datasets**:
-  - `ProductionConsumptionSettlement` - Production by municipality
-  - `ConsumptionDE35Hour` - Consumption by price area
-- **Coverage**: All Danish municipalities
-- **Frequency**: Hourly (with 3-day reporting lag)
-- **Note**: Real-time fetcher automatically fetches from 3 days ago
+**Check 3**: Is WebSocket connected?
+Open browser console on http://localhost:8080 and check for WebSocket messages.
 
 ---
 
@@ -558,34 +496,45 @@ for message in consumer:
 
 | Time | Service | Action |
 |------|---------|--------|
-| Every hour (T+0) | Weather Fetcher | Fetch from DMI, publish to Kafka |
-| Every hour (T+0) | Energy Actual Fetcher | Fetch from Energinet (3 days back), publish to Kafka |
-| T+1 min | Kafka Connect | Write to HDFS |
-| T+1 min | Hive | Data available (external table) |
-| T+2-5 min | Prediction Service | Read from Hive, make predictions, publish to Kafka |
-| Continuous | Frontend | Consume predictions from Kafka in real-time |
+| Every 10 min | Weather Fetcher | Fetch from DMI, publish Avro to Kafka |
+| Every 10 min | Kafka Connect | Write Parquet to HDFS |
+| Every 10 min | Aggregate & Predict | Aggregate bucket from 30 min ago, predict, publish |
+| Every hour | Energy Actual Fetcher | Fetch consumption (3 days back), publish to Kafka |
+| Continuous | Backend | Consume from Kafka, send via WebSocket |
+| Continuous | Frontend | Display real-time chart |
+
+### Data Completeness Strategy
+- Aggregate bucket from **30 minutes ago** to ensure all 10-minute observations have arrived
+- Example: At 02:00, aggregate 01:30-01:39 observations
+- Prevents missing data due to API delays or network issues
 
 ---
 
 ## 🔑 Key Features
 
-✅ **Real-Time**: Hourly weather updates and predictions
-✅ **Historical Archive**: All data stored in HDFS for analysis
-✅ **High Accuracy**: 76% R² for production, 89% R² for consumption
+✅ **High Frequency**: 6 predictions per hour (every 10 minutes)
+✅ **Real-Time**: Live updates via WebSocket to frontend
+✅ **Data Quality**: 30-minute delay ensures complete aggregations
+✅ **Avro Schema**: Type-safe weather data with Schema Registry
+✅ **Historical Archive**: All data stored in HDFS/Hive for analysis
 ✅ **Scalable**: Kafka-based architecture supports multiple consumers
 ✅ **Production-Ready**: Kubernetes deployments with auto-restart
-✅ **Comprehensive**: Weather + Energy in one unified system
-✅ **Clean Output**: Predictions contain only essential data (no weather details)
+✅ **Modern Stack**: PySpark 4.1.0, React, Node.js, Kafka
 
 ---
 
-## 📝 License
+## 📝 Data Sources
 
-This project uses data from:
-- Danish Meteorological Institute (DMI)
-- Energinet (Danish Energy Data Service)
+### DMI (Danish Meteorological Institute)
+- **API**: `https://dmigw.govcloud.dk/v2/metObs/collections/observation/items`
+- **Stations**: 141 active stations (95 DK1, 46 DK2)
+- **Parameters**: 17 weather parameters (temp, wind, humidity, etc.)
+- **Frequency**: Every 10 minutes
 
-Please review their respective terms of service for data usage.
+### Energinet (Danish Energy Data Service)
+- **API**: `https://api.energidataservice.dk/dataset/ConsumptionDE35Hour`
+- **Coverage**: DK1 and DK2 price areas
+- **Frequency**: Hourly (with 3-day reporting lag)
 
 ---
 
@@ -594,9 +543,10 @@ Please review their respective terms of service for data usage.
 For questions or issues:
 1. Check logs: `kubectl logs -n bd-bd-gr-08 -l app=<service-name>`
 2. Verify infrastructure: `kubectl get pods -n bd-bd-gr-08`
-3. Review this README for deployment and troubleshooting guides
+3. Review documentation in `docs/` folder
 
 ---
 
-**Last Updated**: December 28, 2025
+**Last Updated**: January 2, 2026
 **System Status**: Production Ready ✅
+**Prediction Frequency**: 6 per hour (every 10 minutes)

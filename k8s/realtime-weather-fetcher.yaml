@@ -21,20 +21,22 @@ spec:
           - |
             set -e
             echo "Installing dependencies..."
-            pip install -q --no-cache-dir requests pandas numpy kafka-python
+            pip install -q --no-cache-dir requests pandas numpy confluent-kafka[avro] attrs
 
             echo "Starting real-time weather fetcher..."
             cd /app/scripts
-            python3 fetch_realtime_weather.py
+            python3 -u fetch_realtime_weather.py
         env:
         - name: DMI_API_KEY
           value: "b5800a05-4f0f-4584-b130-6129213728c0"
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "kafka-bootstrap:9092"
+        - name: SCHEMA_REGISTRY_URL
+          value: "http://kafka-schema-registry:8081"
         - name: KAFKA_TOPIC
-          value: "weather_hourly_ml"
+          value: "weather_raw_avro"
         - name: FETCH_INTERVAL
-          value: "3600"  # 1 hour
+          value: "600"  # 10 minutes
         volumeMounts:
         - name: code
           mountPath: /app
