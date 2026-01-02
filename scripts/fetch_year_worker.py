@@ -1,16 +1,18 @@
 """
 Kubernetes worker script to fetch data for a specific year.
 Fetches both DMI weather data and Energy production/consumption data.
+Optimized for low memory usage by writing incrementally.
 """
 import os
 import sys
 from datetime import datetime, timedelta
 import requests
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from dotenv import load_dotenv
 from tqdm import tqdm
 import time
-import calendar
 
 # Add parent directory to path for imports to find config.py in root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -31,7 +33,7 @@ DATA_DIR = os.getenv("DATA_DIR", "/data")
 # Fetch settings
 REQUESTS_DELAY = 0.5
 MAX_RETRIES = 3
-
+BATCH_SIZE = 10000  # Number of records to accumulate before writing to disk
 
 # ============ DMI WEATHER DATA FUNCTIONS ============
 
@@ -95,29 +97,36 @@ def process_dmi_records(records):
 
     return processed_data
 
-
-def fetch_dmi_year_data(year, stations, parameters, test_mode=False):
-    """Fetch all DMI weather data for a specific year."""
+def fetch_and_save_dmi_year_data(year, stations, parameters, test_mode=False, light_mode=False):
+    """Fetch and incrementally save DMI weather data."""
     start_date = datetime(year, 1, 1)
     if year == datetime.now().year:
         end_date = datetime.now()
     else:
         end_date = datetime(year, 12, 31, 23, 59, 59)
 
-    # If test mode is enabled, only fetch 1 day of data AND use subset of stations/params
     if test_mode:
         print(f"🧪 TEST MODE: Fetching only 1 day of data for {year}")
-        print(f"🧪 TEST MODE: Using subset of {len(TEST_STATIONS)} stations and {len(DEFAULT_PARAMETERS)} parameters")
         end_date = start_date + timedelta(days=1)
         stations = TEST_STATIONS
         parameters = DEFAULT_PARAMETERS
+    elif light_mode:
+        print(f"💡 LIGHT MODE: Fetching 1 month of data for {year}")
+        end_date = start_date + timedelta(days=31)
 
-    all_records = []
     total_combinations = len(stations) * len(parameters)
-
-    print(f"\n=== Fetching DMI Weather Data for {year} ===")
-    print(f"Date range: {start_date.date()} to {end_date.date()}")
-    print(f"Total combinations: {total_combinations}\n")
+    print(f"\n=== Fetching DMI Weather Data for {year} (Streaming Mode) ===")
+    
+    os.makedirs(DATA_DIR, exist_ok=True)
+    output_file = os.path.join(DATA_DIR, f"dmi_weather_{year}.parquet")
+    
+    # Initialize Parquet Writer
+    writer = None
+    schema = None
+    total_records = 0
+    
+    # Buffer for batching
+    batch_buffer = []
 
     with tqdm(total=total_combinations, desc=f"DMI {year}") as pbar:
         for station_id in stations:
@@ -128,55 +137,74 @@ def fetch_dmi_year_data(year, stations, parameters, test_mode=False):
 
                 if records:
                     processed = process_dmi_records(records)
-                    all_records.extend(processed)
-                    pbar.set_postfix({"total_records": len(all_records)})
+                    batch_buffer.extend(processed)
+                    
+                    # Write batch if buffer is full
+                    if len(batch_buffer) >= BATCH_SIZE:
+                        df_batch = pd.DataFrame(batch_buffer)
+                        
+                        # Process batch (types, derived cols)
+                        df_batch["timestamp"] = pd.to_datetime(df_batch["timestamp"])
+                        df_batch["value"] = pd.to_numeric(df_batch["value"], errors="coerce")
+                        df_batch = df_batch.dropna(subset=["timestamp", "value"])
+                        
+                        df_batch["date"] = df_batch["timestamp"].dt.date
+                        df_batch["hour"] = df_batch["timestamp"].dt.hour
+                        df_batch["year"] = df_batch["timestamp"].dt.year
+                        df_batch["month"] = df_batch["timestamp"].dt.month
+                        df_batch["day"] = df_batch["timestamp"].dt.day
+                        
+                        if not df_batch.empty:
+                            table = pa.Table.from_pandas(df_batch)
+                            
+                            if writer is None:
+                                schema = table.schema
+                                writer = pq.ParquetWriter(output_file, schema, compression='snappy')
+                            
+                            # Ensure schema consistency (cast if needed)
+                            if not table.schema.equals(schema):
+                                table = table.cast(schema)
+                                
+                            writer.write_table(table)
+                            total_records += len(df_batch)
+                        
+                        batch_buffer = [] # Clear buffer
 
                 pbar.update(1)
                 time.sleep(REQUESTS_DELAY)
+    
+    # Write remaining records
+    if batch_buffer:
+        df_batch = pd.DataFrame(batch_buffer)
+        df_batch["timestamp"] = pd.to_datetime(df_batch["timestamp"])
+        df_batch["value"] = pd.to_numeric(df_batch["value"], errors="coerce")
+        df_batch = df_batch.dropna(subset=["timestamp", "value"])
+        
+        df_batch["date"] = df_batch["timestamp"].dt.date
+        df_batch["hour"] = df_batch["timestamp"].dt.hour
+        df_batch["year"] = df_batch["timestamp"].dt.year
+        df_batch["month"] = df_batch["timestamp"].dt.month
+        df_batch["day"] = df_batch["timestamp"].dt.day
+        
+        if not df_batch.empty:
+            table = pa.Table.from_pandas(df_batch)
+            if writer is None:
+                schema = table.schema
+                writer = pq.ParquetWriter(output_file, schema, compression='snappy')
+            
+            if not table.schema.equals(schema):
+                table = table.cast(schema)
+                
+            writer.write_table(table)
+            total_records += len(df_batch)
 
-    print(f"Fetched {len(all_records)} DMI records for {year}")
-    return all_records
-
-
-def save_dmi_data(year_data, year):
-    """Save DMI data for a specific year to Parquet."""
-    if not year_data:
-        print(f"No DMI data for {year}, skipping save")
-        return None
-
-    df = pd.DataFrame(year_data)
-
-    # Convert datatypes
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-
-    # Remove missing data
-    initial_count = len(df)
-    df = df.dropna(subset=["timestamp", "value"])
-    print(f"Removed {initial_count - len(df)} records with missing data")
-
-    # Sort
-    df = df.sort_values(["station_id", "parameter_id", "timestamp"]).reset_index(drop=True)
-
-    # Add derived columns
-    df["date"] = df["timestamp"].dt.date
-    df["hour"] = df["timestamp"].dt.hour
-    df["year"] = df["timestamp"].dt.year
-    df["month"] = df["timestamp"].dt.month
-    df["day"] = df["timestamp"].dt.day
-
-    # Save to Parquet
-    os.makedirs(DATA_DIR, exist_ok=True)
-    output_file = os.path.join(DATA_DIR, f"dmi_weather_{year}.parquet")
-    df.to_parquet(output_file, engine="pyarrow", compression="snappy", index=False)
-
-    file_size = os.path.getsize(output_file)
-    print(f"✓ Saved DMI {year} data: {output_file} ({file_size / 1024 / 1024:.2f} MB)")
-    print(f"  Records: {len(df)}")
-    print(f"  Stations: {df['station_id'].nunique()}")
-    print(f"  Parameters: {df['parameter_id'].nunique()}")
-
-    return df
+    if writer:
+        writer.close()
+        file_size = os.path.getsize(output_file)
+        print(f"✓ Saved DMI {year} data: {output_file} ({file_size / 1024 / 1024:.2f} MB)")
+        print(f"  Total Records: {total_records}")
+    else:
+        print(f"No DMI data found for {year}")
 
 
 # ============ ENERGY DATA FUNCTIONS ============
@@ -216,7 +244,7 @@ def fetch_energy_data(url, start_date, end_date):
     return None
 
 
-def fetch_energy_year_data(year, test_mode=False):
+def fetch_energy_year_data(year, test_mode=False, light_mode=False):
     """Fetch all energy production and consumption data for a specific year."""
     start_date = datetime(year, 1, 1)
     if year == datetime.now().year:
@@ -224,10 +252,12 @@ def fetch_energy_year_data(year, test_mode=False):
     else:
         end_date = datetime(year, 12, 31, 23, 59, 59)
 
-    # If test mode is enabled, only fetch 1 day of data
     if test_mode:
         print(f"🧪 TEST MODE: Fetching only 1 day of data for {year}")
         end_date = start_date + timedelta(days=1)
+    elif light_mode:
+        print(f"💡 LIGHT MODE: Fetching 1 month of data for {year}")
+        end_date = start_date + timedelta(days=31)
 
     print(f"\n=== Fetching Energy Data for {year} ===")
     print(f"Date range: {start_date.date()} to {end_date.date()}")
@@ -356,26 +386,34 @@ def main():
 
     # Check for test mode
     test_mode = os.getenv("TEST_MODE", "false").lower() == "true"
+    light_mode = os.getenv("LIGHT_MODE", "false").lower() == "true"
 
     print(f" KUBERNETES WORKER - YEAR {year}")
     print(f"Data directory: {DATA_DIR}")
     print(f"Worker pod: {os.getenv('HOSTNAME', 'unknown')}")
     if test_mode:
         print(" RUNNING IN TEST MODE (1 day of data)")
+    elif light_mode:
+        print(" RUNNING IN LIGHT MODE (1 month of data)")
 
     # Fetch DMI weather data
     try:
-        dmi_records = fetch_dmi_year_data(year, SYNOP_STATIONS, ALL_PARAMETERS, test_mode)
-        save_dmi_data(dmi_records, year)
+        # Use the new streaming function
+        fetch_and_save_dmi_year_data(year, SYNOP_STATIONS, ALL_PARAMETERS, test_mode, light_mode)
     except Exception as e:
         print(f"Error fetching DMI data: {e}")
+        import traceback
+        traceback.print_exc()
 
     # Fetch Energy data
     try:
-        prod_records, cons_records = fetch_energy_year_data(year, test_mode)
+        # Energy data is smaller, so we can keep the batch approach for now
+        prod_records, cons_records = fetch_energy_year_data(year, test_mode, light_mode)
         save_energy_data(prod_records, cons_records, year)
     except Exception as e:
         print(f"Error fetching energy data: {e}")
+        import traceback
+        traceback.print_exc()
 
     print(f"\n Worker completed for year {year}!")
 

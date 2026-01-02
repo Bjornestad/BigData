@@ -1,0 +1,100 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-data-to-hdfs
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-namenode
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for NameNode..."
+              until nc -z -v -w30 namenode 9000; do
+                echo "Waiting for NameNode (namenode:9000)..."
+                sleep 5
+              done
+              echo "NameNode is ready!"
+      containers:
+      - name: hdfs-loader
+        image: rtdl/hive-metastore:3.1.2
+        securityContext:
+          runAsUser: 0
+        command:
+          - /bin/bash
+          - -c
+          - |
+            set -e
+
+            export HADOOP_HOME=/opt/hadoop-3.3.1
+            export PATH=$HADOOP_HOME/bin:$PATH
+
+            echo "Configuring HDFS client..."
+            cat > $HADOOP_HOME/etc/hadoop/core-site.xml <<'HDFS_CONFIG'
+            <?xml version="1.0"?>
+            <configuration>
+              <property>
+                <name>fs.defaultFS</name>
+                <value>hdfs://namenode:9000</value>
+              </property>
+            </configuration>
+            HDFS_CONFIG
+
+            echo "Creating base HDFS directories..."
+            hdfs dfs -mkdir -p /user/hive/warehouse/weather_wind_solar_area_hourly
+            hdfs dfs -mkdir -p /user/hive/warehouse/energy_by_municipality
+            hdfs dfs -mkdir -p /user/hive/warehouse/consumption_coverage_location
+
+            echo "Uploading Parquet files from PVC to HDFS..."
+
+            # Note: The source files are the combined output of the fetch jobs
+            # We assume they are named something like 'dmi_weather_all.parquet' and 'energy_data_all.parquet'
+            # If they are per-year, we need to loop. Let's assume a single file for now.
+
+            # This is a placeholder - you need to adjust the source file names
+            # based on what fetch_year_worker.py actually creates.
+            # For now, let's assume it creates per-year files.
+
+            for year in 2021 2022 2023 2024 2025; do
+              WEATHER_FILE="/data/dmi_weather_${year}.parquet"
+              ENERGY_FILE="/data/energy_data_${year}.parquet"
+
+              if [ -f "$WEATHER_FILE" ]; then
+                echo "Uploading $WEATHER_FILE to hdfs:///user/hive/warehouse/weather_wind_solar_area_hourly/"
+                hdfs dfs -put -f "$WEATHER_FILE" /user/hive/warehouse/weather_wind_solar_area_hourly/
+              else
+                echo "Warning: $WEATHER_FILE not found. Skipping."
+              fi
+
+              # The energy data needs to be split or handled correctly.
+              # For now, let's assume the training script's fallback can handle the raw energy file.
+              if [ -f "$ENERGY_FILE" ]; then
+                 echo "Uploading $ENERGY_FILE to hdfs:///user/hive/warehouse/energy_by_municipality/"
+                 hdfs dfs -put -f "$ENERGY_FILE" /user/hive/warehouse/energy_by_municipality/
+
+                 # Also copy to consumption as the fallback logic might need it
+                 echo "Uploading $ENERGY_FILE to hdfs:///user/hive/warehouse/consumption_coverage_location/"
+                 hdfs dfs -put -f "$ENERGY_FILE" /user/hive/warehouse/consumption_coverage_location/
+              else
+                echo "Warning: $ENERGY_FILE not found. Skipping."
+              fi
+            done
+
+            echo "HDFS upload process complete. Verifying files:"
+            hdfs dfs -ls -R /user/hive/warehouse/
+
+        volumeMounts:
+        - name: data-storage
+          mountPath: /data
+      volumes:
+      - name: data-storage
+        persistentVolumeClaim:
+          claimName: weather-data-pvc

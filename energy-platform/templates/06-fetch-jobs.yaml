@@ -18,6 +18,18 @@ spec:
         year: "2021"
     spec:
       restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-hive
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for Hive Metastore..."
+              until nc -z -v -w30 hive-metastore 9083; do
+                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
+                sleep 5
+              done
+              echo "Hive Metastore is ready!"
       containers:
         - name: fetcher
           image: dummystad/bigdata:fetcher-latest
@@ -36,7 +48,9 @@ spec:
             - name: DATA_DIR
               value: "/data"
             - name: TEST_MODE
-              value: "true"  # Set to "true" for testing (1 day), "false" for full year
+              value: "false"
+            - name: LIGHT_MODE
+              value: "true"  # Fetch 1 month of data
             - name: API_KEY
               valueFrom:
                 configMapKeyRef:
@@ -63,6 +77,18 @@ spec:
         year: "2022"
     spec:
       restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-hive
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for Hive Metastore..."
+              until nc -z -v -w30 hive-metastore 9083; do
+                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
+                sleep 5
+              done
+              echo "Hive Metastore is ready!"
       containers:
         - name: fetcher
           image: dummystad/bigdata:fetcher-latest
@@ -81,6 +107,8 @@ spec:
             - name: DATA_DIR
               value: "/data"
             - name: TEST_MODE
+              value: "false"
+            - name: LIGHT_MODE
               value: "true"
             - name: API_KEY
               valueFrom:
@@ -108,6 +136,18 @@ spec:
         year: "2023"
     spec:
       restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-hive
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for Hive Metastore..."
+              until nc -z -v -w30 hive-metastore 9083; do
+                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
+                sleep 5
+              done
+              echo "Hive Metastore is ready!"
       containers:
         - name: fetcher
           image: dummystad/bigdata:fetcher-latest
@@ -126,6 +166,8 @@ spec:
             - name: DATA_DIR
               value: "/data"
             - name: TEST_MODE
+              value: "false"
+            - name: LIGHT_MODE
               value: "true"
             - name: API_KEY
               valueFrom:
@@ -153,6 +195,18 @@ spec:
         year: "2024"
     spec:
       restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-hive
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for Hive Metastore..."
+              until nc -z -v -w30 hive-metastore 9083; do
+                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
+                sleep 5
+              done
+              echo "Hive Metastore is ready!"
       containers:
         - name: fetcher
           image: dummystad/bigdata:fetcher-latest
@@ -171,6 +225,8 @@ spec:
             - name: DATA_DIR
               value: "/data"
             - name: TEST_MODE
+              value: "false"
+            - name: LIGHT_MODE
               value: "true"
             - name: API_KEY
               valueFrom:
@@ -198,6 +254,18 @@ spec:
         year: "2025"
     spec:
       restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-hive
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for Hive Metastore..."
+              until nc -z -v -w30 hive-metastore 9083; do
+                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
+                sleep 5
+              done
+              echo "Hive Metastore is ready!"
       containers:
         - name: fetcher
           image: dummystad/bigdata:fetcher-latest
@@ -216,6 +284,8 @@ spec:
             - name: DATA_DIR
               value: "/data"
             - name: TEST_MODE
+              value: "false"
+            - name: LIGHT_MODE
               value: "true"
             - name: API_KEY
               valueFrom:

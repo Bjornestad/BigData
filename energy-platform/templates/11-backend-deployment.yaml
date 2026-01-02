@@ -29,11 +29,11 @@ spec:
             sleep 5
           done
           echo "Kafka broker is ready!"
-          
+
           echo "Checking topics..."
           kafka-topics.sh --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --list || true
           echo "Init complete!"
-      
+
       containers:
       - name: backend
         image: {{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag | default "latest" }}
@@ -99,6 +99,10 @@ spec:
           limits:
             memory: "512Mi"
             cpu: "500m"
+      volumes:
+      - name: code
+        persistentVolumeClaim:
+          claimName: weather-data-pvc
 ---
 apiVersion: v1
 kind: Service

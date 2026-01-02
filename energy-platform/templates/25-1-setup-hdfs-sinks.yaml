@@ -38,7 +38,7 @@ spec:
 
             echo ""
             echo "================================================================"
-            echo "CREATING HDFS SINK #1: weather_hourly_ml"
+            echo "CREATING HDFS SINK #1: weather_raw_avro (PARQUET)"
             echo "================================================================"
 
             curl -X POST $CONNECT_URL/connectors \
@@ -48,16 +48,17 @@ spec:
               "config": {
                 "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
                 "tasks.max": "1",
-                "topics": "weather_hourly_ml",
+                "topics": "weather_raw_avro",
                 "hdfs.url": "hdfs://namenode:9000",
                 "topics.dir": "/user/hive/warehouse/weather_wind_solar_area_hourly",
                 "flush.size": "10",
                 "rotate.interval.ms": "60000",
-                "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
+                "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
+                "parquet.codec": "snappy",
                 "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
                 "schema.compatibility": "NONE",
-                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-                "value.converter.schemas.enable": "false",
+                "value.converter": "io.confluent.connect.avro.AvroConverter",
+                "value.converter.schema.registry.url": "http://schema-registry:8081",
                 "key.converter": "org.apache.kafka.connect.storage.StringConverter",
                 "errors.tolerance": "all",
                 "errors.log.enable": "true"
@@ -67,7 +68,7 @@ spec:
             echo ""
             echo ""
             echo "================================================================"
-            echo "CREATING HDFS SINK #2: energy_actual"
+            echo "CREATING HDFS SINK #2: energy_actual (PARQUET)"
             echo "================================================================"
 
             curl -X POST $CONNECT_URL/connectors \
@@ -82,11 +83,12 @@ spec:
                 "topics.dir": "/user/hive/warehouse/energy_actual_realtime",
                 "flush.size": "10",
                 "rotate.interval.ms": "60000",
-                "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
+                "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
+                "parquet.codec": "snappy",
                 "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
                 "schema.compatibility": "NONE",
-                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-                "value.converter.schemas.enable": "false",
+                "value.converter": "io.confluent.connect.avro.AvroConverter",
+                "value.converter.schema.registry.url": "http://schema-registry:8081",
                 "key.converter": "org.apache.kafka.connect.storage.StringConverter",
                 "errors.tolerance": "all",
                 "errors.log.enable": "true"
@@ -96,7 +98,7 @@ spec:
             echo ""
             echo ""
             echo "================================================================"
-            echo "CREATING HDFS SINK #3: energy_predictions"
+            echo "CREATING HDFS SINK #3: energy_predictions (PARQUET)"
             echo "================================================================"
 
             curl -X POST $CONNECT_URL/connectors \
@@ -111,11 +113,12 @@ spec:
                 "topics.dir": "/user/hive/warehouse/energy_predictions_realtime",
                 "flush.size": "10",
                 "rotate.interval.ms": "60000",
-                "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
+                "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
+                "parquet.codec": "snappy",
                 "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
                 "schema.compatibility": "NONE",
-                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
-                "value.converter.schemas.enable": "false",
+                "value.converter": "io.confluent.connect.avro.AvroConverter",
+                "value.converter.schema.registry.url": "http://schema-registry:8081",
                 "key.converter": "org.apache.kafka.connect.storage.StringConverter",
                 "errors.tolerance": "all",
                 "errors.log.enable": "true"
@@ -153,7 +156,7 @@ spec:
             echo "✓ HDFS sinks configured successfully!"
             echo ""
             echo "Data will flow:"
-            echo "  weather_hourly_ml      → /user/hive/warehouse/weather_wind_solar_area_hourly/"
+            echo "  weather_raw_avro       → /user/hive/warehouse/weather_wind_solar_area_hourly/"
             echo "  energy_actual          → /user/hive/warehouse/energy_actual_realtime/"
             echo "  energy_predictions     → /user/hive/warehouse/energy_predictions_realtime/"
 

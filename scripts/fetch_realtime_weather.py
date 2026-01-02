@@ -3,6 +3,7 @@
 Real-time Weather Data Fetcher for ML Pipeline
 Fetches latest hourly weather data aggregated by DK area (DK1/DK2)
 Matches the schema of weather_wind_solar_area_hourly table
+Uses Avro with Schema Registry for Kafka messages
 """
 
 import os
@@ -10,22 +11,26 @@ import sys
 import time
 import json
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
-from kafka import KafkaProducer
-from kafka.errors import KafkaError
+from confluent_kafka import Producer
+from confluent_kafka.serialization import SerializationContext, MessageField
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroSerializer
 
 # Configuration
 DMI_API_URL = "https://dmigw.govcloud.dk/v2/metObs/collections/observation/items"
 DMI_API_KEY = os.getenv("DMI_API_KEY", "b5800a05-4f0f-4584-b130-6129213728c0")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_hourly_ml")
-FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "3600"))  # 1 hour default
+SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://kafka-schema-registry:8081")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_raw")
+FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "600"))  # 10 minutes default
 
-# All stations from Hive station_metadata table
-# DK1 stations (West Denmark)
-DK1_STATIONS = [
+# All weather stations - will get from Hive station_metadata
+# For now, fetching from ALL stations (DMI API will return data for active ones)
+# Station IDs in Denmark range from 05xxx to 06xxx
+ALL_STATIONS = [
     "05005", "05009", "05015", "05031", "05035", "05042", "05065", "05070",
     "05075", "05081", "05085", "05089", "05095", "05105", "05109", "05135",
     "05140", "05150", "05160", "05165", "05169", "05185", "05199", "05202",
@@ -33,50 +38,51 @@ DK1_STATIONS = [
     "05296", "05300", "05305", "05320", "05329", "05343", "05345", "05350",
     "05355", "05365", "05375", "05381", "05384", "05395", "05400", "05406",
     "05408", "05435", "05440", "05450", "05455", "05469",
+    "05499", "05505", "05510", "05529", "05537", "05545", "05575", "05735",
+    "05880", "05889", "05935", "05945", "05960", "05970", "05981", "05986",
+    "05994",
     "06018", "06019", "06023", "06030", "06031", "06032", "06034", "06041",
     "06043", "06049", "06051", "06052", "06056", "06058", "06060", "06065",
     "06068", "06069", "06070", "06071", "06072", "06073", "06074", "06079",
     "06080", "06081", "06082", "06088", "06089", "06093", "06096", "06102",
     "06104", "06108", "06109", "06110", "06111", "06116", "06118", "06119",
-    "06120", "06123", "06124", "06126", "06132"
-]
-
-# DK2 stations (East Denmark)
-DK2_STATIONS = [
-    "05499", "05505", "05510", "05529", "05537", "05545", "05575", "05735",
-    "05880", "05889", "05935", "05945", "05960", "05970", "05981", "05986",
-    "05994",
+    "06120", "06123", "06124", "06126", "06132",
     "06135", "06136", "06138", "06141", "06147", "06149", "06151", "06154",
     "06156", "06159", "06168", "06169", "06170", "06174", "06180", "06181",
     "06183", "06186", "06187", "06188", "06190", "06191", "06193", "06197"
 ]
 
-# Mapping stations to DK areas
-STATION_TO_DK_AREA = {}
-for s in DK1_STATIONS:
-    STATION_TO_DK_AREA[s] = "DK1"
-for s in DK2_STATIONS:
-    STATION_TO_DK_AREA[s] = "DK2"
+# Avro Schema for weather observations
+AVRO_SCHEMA = """{
+    "type": "record",
+    "name": "WeatherObservation",
+    "namespace": "dk.weather",
+    "fields": [
+        {"name": "station_id", "type": ["null", "string"], "default": null},
+        {"name": "observed", "type": ["null", "string"], "default": null},
+        {"name": "parameter_id", "type": ["null", "string"], "default": null},
+        {"name": "value", "type": ["null", "double"], "default": null}
+    ]
+}"""
 
-ALL_STATIONS = DK1_STATIONS + DK2_STATIONS
-
-# Kafka Producer
+# Global producer and serializer
 producer = None
+avro_serializer = None
 
-# Parameter mapping
-WIND_PARAMS = ["wind_speed", "wind_speed_past1h_max", "wind_dir"]
-SOLAR_PARAMS = ["radia_glob_past1h", "sun_last1h_glob", "cloud_cover"]
+def dict_to_weather_observation(obj, ctx):
+    """Convert dictionary to Avro-compatible format"""
+    return obj
 
-def fetch_station_data(station_id, hours_back=1):
-    """Fetch weather data for a single station"""
-    end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(hours=hours_back)
+def fetch_station_data(station_id, minutes_back=10):
+    """Fetch latest weather observations for a single station"""
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(minutes=minutes_back)
 
     params = {
         'api-key': DMI_API_KEY,
         'stationId': station_id,
         'datetime': f'{start_time.strftime("%Y-%m-%dT%H:%M:%SZ")}/{end_time.strftime("%Y-%m-%dT%H:%M:%SZ")}',
-        'limit': 1000
+        'limit': 100
     }
 
     try:
@@ -85,13 +91,13 @@ def fetch_station_data(station_id, hours_back=1):
         data = response.json()
         return data.get('features', [])
     except Exception as e:
-        print(f"  ✗ Error fetching {station_id}: {e}", file=sys.stderr)
+        # Silent failure - many stations are inactive
         return []
 
-def process_station_observations(features, station_id):
-    """Process observations from a single station into hourly records"""
+def process_raw_observations(features, station_id):
+    """Convert raw observations to records for Kafka"""
     if not features:
-        return pd.DataFrame()
+        return []
 
     records = []
     for feature in features:
@@ -100,172 +106,128 @@ def process_station_observations(features, station_id):
         if not timestamp_str:
             continue
 
-        records.append({
-            'station_id': station_id,
-            'dk_area': STATION_TO_DK_AREA.get(station_id, 'UNKNOWN'),
-            'timestamp': timestamp_str,
-            'parameter_id': props.get('parameterId'),
-            'value': props.get('value'),
-        })
+        # Convert value to float (Avro schema expects double, not string)
+        value = props.get('value')
+        if value is not None:
+            try:
+                value = float(value)
+            except (ValueError, TypeError):
+                value = None
 
-    if not records:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(records)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['year'] = df['timestamp'].dt.year
-    df['month'] = df['timestamp'].dt.month
-    df['day'] = df['timestamp'].dt.day
-    df['hour'] = df['timestamp'].dt.hour
-
-    # Pivot to wide format per station
-    df_wide = df.pivot_table(
-        index=['station_id', 'dk_area', 'year', 'month', 'day', 'hour'],
-        columns='parameter_id',
-        values='value',
-        aggfunc='first'
-    ).reset_index()
-
-    df_wide.columns.name = None
-    return df_wide
-
-def aggregate_to_dk_area_hourly(all_station_data):
-    """
-    Aggregate all station data to DK area hourly format
-    Matches schema: weather_wind_solar_area_hourly
-    """
-    if all_station_data.empty:
-        return []
-
-    # Group by dk_area, year, month, day, hour
-    grouped = all_station_data.groupby(['dk_area', 'year', 'month', 'day', 'hour'])
-
-    aggregated_records = []
-
-    for (dk_area, year, month, day, hour), group_df in grouped:
         record = {
-            'dk_area': dk_area,
-            'year': int(year),
-            'month': int(month),
-            'day': int(day),
-            'hour': int(hour),
+        'station_id': station_id,
+        'observed': timestamp_str,
+        'parameter_id': props.get('parameterId'),
+        'value': value
         }
+        records.append(record)
 
-        # Count stations contributing to each metric
-        record['n_stations_wind'] = int(group_df['wind_speed'].notna().sum()) if 'wind_speed' in group_df.columns else 0
-        record['n_stations_solar'] = int(group_df['radia_glob_past1h'].notna().sum()) if 'radia_glob_past1h' in group_df.columns else 0
+    return records
 
-        # Wind metrics (mean across stations) - matching historical table schema
-        record['wind_speed_mean_area'] = group_df['wind_speed'].mean() if 'wind_speed' in group_df.columns else None
-        record['wind_speed_max_area'] = group_df['wind_speed_past1h_max'].max() if 'wind_speed_past1h_max' in group_df.columns else None
-
-        # Wind direction (convert to sin/cos and average) - matching historical table schema
-        if 'wind_dir' in group_df.columns:
-            wind_dirs = group_df['wind_dir'].dropna()
-            if len(wind_dirs) > 0:
-                wind_dirs_rad = np.deg2rad(wind_dirs)
-                sin_avg = np.sin(wind_dirs_rad).mean()
-                cos_avg = np.cos(wind_dirs_rad).mean()
-                record['wind_dir_sin_area'] = float(sin_avg)
-                record['wind_dir_cos_area'] = float(cos_avg)
-            else:
-                record['wind_dir_sin_area'] = None
-                record['wind_dir_cos_area'] = None
-        else:
-            record['wind_dir_sin_area'] = None
-            record['wind_dir_cos_area'] = None
-
-        # Solar metrics (mean across stations) - matching historical table schema
-        record['radia_glob_past1h_area'] = group_df['radia_glob_past1h'].mean() if 'radia_glob_past1h' in group_df.columns else None
-        record['sun_last1h_glob_area'] = group_df['sun_last1h_glob'].mean() if 'sun_last1h_glob' in group_df.columns else None
-        record['cloud_cover_mean_area'] = group_df['cloud_cover'].mean() if 'cloud_cover' in group_df.columns else None
-
-        aggregated_records.append(record)
-
-    return aggregated_records
+def delivery_report(err, msg):
+    """Kafka delivery callback"""
+    if err is not None:
+        print(f'  ✗ Message delivery failed: {err}')
 
 def send_to_kafka(records):
-    """Send aggregated records to Kafka"""
-    global producer
+    """Send raw observation records to Kafka using Avro with Schema Registry"""
+    global producer, avro_serializer
 
     if not records:
         return False
 
     if producer is None:
         try:
-            producer = KafkaProducer(
-                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                value_serializer=lambda v: json.dumps(v, default=str).encode('utf-8'),
-                key_serializer=lambda k: k.encode('utf-8') if k else None
+            # Initialize Schema Registry client
+            schema_registry_conf = {'url': SCHEMA_REGISTRY_URL}
+            schema_registry_client = SchemaRegistryClient(schema_registry_conf)
+
+            # Initialize Avro serializer
+            avro_serializer = AvroSerializer(
+                schema_registry_client,
+                AVRO_SCHEMA,
+                dict_to_weather_observation
             )
+
+            # Initialize Kafka producer
+            producer_conf = {
+                'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
+                'client.id': 'weather-fetcher'
+            }
+            producer = Producer(producer_conf)
+
             print(f"  ✓ Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+            print(f"  ✓ Connected to Schema Registry at {SCHEMA_REGISTRY_URL}")
+            print(f"  ✓ Using Avro serialization")
         except Exception as e:
-            print(f"  ✗ Failed to connect to Kafka: {e}")
+            print(f"  ✗ Failed to initialize Kafka/Schema Registry: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     try:
+        sent_count = 0
         for record in records:
-            key = f"{record['dk_area']}_{record['year']}_{record['month']}_{record['day']}_{record['hour']}"
-            future = producer.send(KAFKA_TOPIC, key=key, value=record)
-            future.get(timeout=10)
+            key = f"{record['station_id']}_{record['observed']}"
+
+            # Serialize the record to Avro
+            serialized_value = avro_serializer(
+                record,
+                SerializationContext(KAFKA_TOPIC, MessageField.VALUE)
+            )
+
+            # Send to Kafka
+            producer.produce(
+                topic=KAFKA_TOPIC,
+                key=key.encode('utf-8'),
+                value=serialized_value,
+                on_delivery=delivery_report
+            )
+            sent_count += 1
 
         producer.flush()
-        print(f"  ✓ Sent {len(records)} hourly records to Kafka topic '{KAFKA_TOPIC}'")
-        for r in records:
-            print(f"    - {r['dk_area']} {r['year']}-{r['month']:02d}-{r['day']:02d} {r['hour']:02d}:00 | "
-                  f"Wind: {r.get('wind_speed_mean_area', 'N/A')} m/s | "
-                  f"Solar: {r.get('radia_glob_past1h_area', 'N/A')} W/m²")
+        print(f"  ✓ Sent {sent_count} Avro records to Kafka topic '{KAFKA_TOPIC}'")
         return True
     except Exception as e:
         print(f"  ✗ Error sending to Kafka: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def main():
-    """Main loop"""
+    """Main loop - fetch latest observations every 10 minutes"""
     print(f"🌤️  Real-time Weather Fetcher for ML Pipeline")
-    print(f"   DK1 Stations: {len(DK1_STATIONS)}")
-    print(f"   DK2 Stations: {len(DK2_STATIONS)}")
+    print(f"   Total Stations: {len(ALL_STATIONS)}")
     print(f"   Kafka Topic: {KAFKA_TOPIC}")
-    print(f"   Fetch Interval: {FETCH_INTERVAL}s ({FETCH_INTERVAL/3600:.1f}h)")
+    print(f"   Fetch Interval: {FETCH_INTERVAL}s ({FETCH_INTERVAL/60:.1f} min)")
+    print(f"   Strategy: Fetch raw observations, Hive aggregates hourly")
     print(f"{'='*70}\n")
 
     iteration = 0
     while True:
         iteration += 1
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iteration {iteration}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Batch {iteration}")
 
-        # Fetch data from all stations
-        all_station_dataframes = []
+        # Fetch latest observations from all stations
+        all_records = []
+        active_stations = 0
 
         for station_id in ALL_STATIONS:
-            print(f"  Fetching {station_id} ({STATION_TO_DK_AREA[station_id]})...", end=" ")
-            features = fetch_station_data(station_id, hours_back=2)
+            features = fetch_station_data(station_id, minutes_back=15)
 
             if features:
-                df = process_station_observations(features, station_id)
-                if not df.empty:
-                    all_station_dataframes.append(df)
-                    print(f"✓ {len(features)} obs")
-                else:
-                    print(f"✗ No valid data")
-            else:
-                print(f"✗ Fetch failed")
+                records = process_raw_observations(features, station_id)
+                if records:
+                    all_records.extend(records)
+                    active_stations += 1
+                    print(f"  Fetching {station_id}... ✓ {len(records)} obs")
 
-        # Combine all station data
-        if all_station_dataframes:
-            combined_df = pd.concat(all_station_dataframes, ignore_index=True)
-            print(f"\n  Combined: {len(combined_df)} station-hours")
-
-            # Aggregate to DK area hourly
-            hourly_records = aggregate_to_dk_area_hourly(combined_df)
-
-            if hourly_records:
-                print(f"  Aggregated: {len(hourly_records)} DK-area hours")
-                send_to_kafka(hourly_records)
-            else:
-                print(f"  ✗ No aggregated records")
+        # Send all observations to Kafka
+        if all_records:
+            print(f"\n  Batch complete: {len(all_records)} observations from {active_stations} active stations")
+            send_to_kafka(all_records)
         else:
-            print(f"  ✗ No station data available")
+            print(f"  ✗ No observations available this batch")
 
         # Wait for next interval
         print(f"\n  Sleeping for {FETCH_INTERVAL}s...\n")

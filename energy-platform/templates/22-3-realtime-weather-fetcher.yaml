@@ -28,8 +28,11 @@ spec:
           value: "b5800a05-4f0f-4584-b130-6129213728c0"
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "{{ .Release.Name }}-energy-cluster:9092"
+        - name: SCHEMA_REGISTRY_URL
+          value: "http://schema-registry:8081"
+        # Updated to match Anders configuration and likely Spark expectations
         - name: KAFKA_TOPIC
-          value: "weather_hourly_ml"
+          value: "weather_raw_avro"
         - name: FETCH_INTERVAL
-          value: "3600"  # 1 hour
+          value: "600"  # 10 minutes
       restartPolicy: Always

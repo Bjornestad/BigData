@@ -23,10 +23,12 @@ spec:
               value: "{{ .Release.Name }}-energy-cluster:9092"
             - name: CONNECT_REST_PORT
               value: "8083"
+            - name: CONNECT_REST_LISTENERS
+              value: "http://0.0.0.0:8083"
             - name: CONNECT_REST_ADVERTISED_HOST_NAME
               value: "kafka-connect"
             - name: CONNECT_GROUP_ID
-              value: "connect-cluster-group"
+              value: "kafka-connect-group-id-01"
             - name: CONNECT_CONFIG_STORAGE_TOPIC
               value: "connect-configs"
             - name: CONNECT_OFFSET_STORAGE_TOPIC
@@ -34,20 +36,32 @@ spec:
             - name: CONNECT_STATUS_STORAGE_TOPIC
               value: "connect-status"
             - name: CONNECT_KEY_CONVERTER
-              value: "org.apache.kafka.connect.storage.StringConverter"
+              value: "io.confluent.connect.avro.AvroConverter"
+            - name: CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL
+              value: "http://schema-registry:8081"
             - name: CONNECT_VALUE_CONVERTER
               value: "io.confluent.connect.avro.AvroConverter"
             - name: CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL
               value: "http://schema-registry:8081"
-            # Point to the baked-in plugin paths
+            - name: CONNECT_INTERNAL_KEY_CONVERTER
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: CONNECT_INTERNAL_VALUE_CONVERTER
+              value: "org.apache.kafka.connect.json.JsonConverter"
+            - name: CONNECT_INTERNAL_KEY_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
+            - name: CONNECT_INTERNAL_VALUE_CONVERTER_SCHEMAS_ENABLE
+              value: "false"
+            # Point to the baked-in plugin paths + shared data jars
             - name: CONNECT_PLUGIN_PATH
-              value: "/plugins/kafka-connect-hdfs,/plugins/kafka-connect-jdbc,/usr/share/java,/usr/share/confluent-hub-components"
+              value: "/plugins/kafka-connect-hdfs,/plugins/kafka-connect-jdbc,/usr/share/java,/usr/share/confluent-hub-components,/data/connect-jars"
             - name: CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR
               value: "3"
             - name: CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR
               value: "3"
             - name: CONNECT_STATUS_STORAGE_REPLICATION_FACTOR
               value: "3"
+            - name: HADOOP_USER_NAME
+              value: "root"
           volumeMounts:
             - name: shared-data
               mountPath: /data

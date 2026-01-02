@@ -6,7 +6,7 @@ metadata:
 data:
   KAFKA_BROKERS: "{{ .Release.Name }}-energy-cluster:9092"
 
-  KAFKA_SCHEMAREGISTRY_ENABLED: "false"
+  KAFKA_SCHEMAREGISTRY_ENABLED: "true"
   KAFKA_SCHEMAREGISTRY_URLS: "http://schema-registry:8081"
 
   CONNECT_ENABLED: "true"

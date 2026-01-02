@@ -7,7 +7,7 @@ bd-gr-08-sa-bd-bd-gr-08-kubeconfig.yaml
 .kube/
 secrets/
 *.secret
-
+#NotNeededQuestionMark
 # ============================================
 # Environment & Configuration
 # ============================================

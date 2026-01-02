@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aggregate-and-predict-service
+  namespace: {{ .Release.Namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aggregate-and-predict
+  template:
+    metadata:
+      labels:
+        app: aggregate-and-predict
+    spec:
+      containers:
+      - name: service
+        image: dummystad/bigdata:prediction-service-latest
+        imagePullPolicy: Always
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "Starting aggregate and predict service..."
+            cd /app/SparkML
+            python3 -u aggregate_and_predict_service.py
+        env:
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "{{ .Release.Name }}-energy-cluster:9092"
+        - name: OUTPUT_TOPIC
+          value: "energy_predictions"
+        # Point to the models on the shared PVC mounted at /data
+        # The training job saves them to /data/SparkML/models/consumption_model
+        - name: CONSUMPTION_MODEL_PATH
+          value: "/data/SparkML/models/consumption_model"
+        - name: CHECK_INTERVAL
+          value: "600"  # 10 minutes
+        - name: JAVA_HOME
+          value: "/opt/java/openjdk"
+        volumeMounts:
+        - name: code
+          mountPath: /data
+      volumes:
+      - name: code
+        persistentVolumeClaim:
+          claimName: weather-data-pvc
+      restartPolicy: Always

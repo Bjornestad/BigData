@@ -29,5 +29,5 @@ spec:
         - name: KAFKA_TOPIC
           value: "energy_actual"
         - name: FETCH_INTERVAL
-          value: "300"  # 5 minutes (energy data is timestamped hourly but updated frequently)
+          value: "3600"  # 1 hour (energy data is timestamped hourly)
       restartPolicy: Always
