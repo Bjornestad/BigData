@@ -1,0 +1,49 @@
+{
+  "created_at": "20251218_114237",
+  "model_type": "RF",
+  "test_metrics": {
+    "RMSE": 3.0349773762306422,
+    "MAE": 2.464632446811035,
+    "R2": 0.8212103391983119
+  },
+  "config": {
+    "HIVE_DB": "default",
+    "HIVE_TABLE": "sample_table",
+    "MODEL_OUTPUT_PATH": "./SparkML/models",
+    "MODEL_NAME": "spark_model",
+    "TOKEN_SIZE": 8,
+    "TRAIN_FRAC": 0.7,
+    "VALID_FRAC": 0.15,
+    "TEST_FRAC": 0.15,
+    "LAGS": [
+      1,
+      2,
+      24
+    ],
+    "ROLL_WINDOWS_HOURS": [
+      3,
+      24,
+      168
+    ],
+    "RF": {
+      "numTrees": [
+        10,
+        20
+      ],
+      "maxDepth": [
+        5
+      ]
+    },
+    "GBT": {
+      "maxIter": [
+        10
+      ],
+      "maxDepth": [
+        4
+      ]
+    },
+    "SPARK_MASTER": "local[*]",
+    "APP_NAME": "SparkApp",
+    "SAMPLE_ZONE": null
+  }
+}

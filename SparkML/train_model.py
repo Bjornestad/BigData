@@ -4,6 +4,8 @@ import datetime
 import random
 import sys
 from typing import List
+import pandas as pd
+from matplotlib import pyplot as plt
 
 from pyspark.sql import SparkSession, functions as F, types as T, Row
 from pyspark.sql.window import Window
@@ -528,14 +530,38 @@ def main():
         
         if latest_row:
             live_token = latest_row[0]["token"]
-            
-            # 2. Use 'score_live_with_object' instead of 'score_live_weather'
-            # (Because score_live_weather is empty/commented out in your file)
             pred_df = score_live_with_object(spark, best_model, live_token, zone=sample_zone, use_mock=USE_MOCK_DATA)
             
             print("Live weather token prediction:\n", pred_df)
         else:
             print("No data found for demo scoring.")
+    
+        print("Generating training graph...")
+
+        predictions_to_plot = best_model.transform(test) \
+            .select(F.col("ts").cast("string"), "price", "prediction") \
+            .limit(100) \
+            .toPandas()
+
+        # Convert back to datetime in Pandas so the X-axis plots correctly
+        predictions_to_plot["ts"] = pd.to_datetime(predictions_to_plot["ts"])
+
+        plt.figure(figsize=(12, 6))
+        
+        plt.plot(predictions_to_plot["ts"], predictions_to_plot["price"], label="Actual Value", color='blue', alpha=0.6)
+        
+        plt.plot(predictions_to_plot["ts"], predictions_to_plot["prediction"], label="Model Prediction", color='orange', linestyle='--')
+
+        plt.title(f"Model Performance ({best_type})")
+        plt.xlabel("Time")
+        plt.ylabel("Value (Price/Temp)") # Change label depending on your data
+        plt.legend()
+        plt.grid(True)
+
+        # 3. Save the graph to a file
+        graph_filename = "prediction_graph.png"
+        plt.savefig(graph_filename)
+        print(f"Graph saved to {graph_filename}")
 
     finally:
         spark.stop()
