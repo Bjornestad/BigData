@@ -8,7 +8,7 @@
     "timezone": "UTC",
     "hive.database": "default",
     "rotate.interval.ms": "60000",
-    "hive.partition.field.name": "year,month",
+    "hive.partition.field.name": "year,month,day",
     "locale": "en-US",
     "logs.dir": "/tmp/logs",
     "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
@@ -17,7 +17,7 @@
     "value.converter": "io.confluent.connect.avro.AvroConverter",
     "errors.log.enable": "true",
     "key.converter": "org.apache.kafka.connect.storage.StringConverter",
-    "partition.duration.ms": "2678400000",
+    "partition.duration.ms": "86400000",
     "schema.compatibility": "BACKWARD",
     "topics": "weather_raw_avro",
     "parquet.codec": "snappy",
@@ -28,7 +28,7 @@
     "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
     "name": "hdfs-sink-weather-raw-avro",
     "errors.tolerance": "all",
-    "path.format": "'year'=YYYY/'month'=M",
+    "path.format": "'year'=YYYY/'month'=MM/'day'=dd",
     "timestamp.extractor": "Wallclock"
   }
 }
