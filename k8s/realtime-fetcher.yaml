@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: realtime-fetcher
+  namespace: bd-bd-gr-08
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: realtime-fetcher
+  template:
+    metadata:
+      labels:
+        app: realtime-fetcher
+    spec:
+      containers:
+      - name: fetcher
+        image: python:3.11-slim
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            set -e
+            echo "Installing dependencies..."
+            pip install -q --no-cache-dir requests pandas numpy confluent-kafka[avro] attrs httpx
+
+            echo "Starting real-time weather fetcher..."
+            cd /app/scripts
+            python3 -u fetch_realtime_weather.py &
+
+            echo "Starting real-time energy fetcher..."
+            python3 -u fetch_realtime_energy.py &
+
+            wait
+        env:
+        # Weather fetcher env vars
+        - name: DMI_API_KEY
+          value: "b5800a05-4f0f-4584-b130-6129213728c0"
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "kafka-bootstrap:9092"
+        - name: SCHEMA_REGISTRY_URL
+          value: "http://kafka-schema-registry:8081"
+        - name: KAFKA_TOPIC
+          value: "weather_raw_avro"
+        - name: FETCH_INTERVAL
+          value: "300"  # 5 minutes
+        # Energy fetcher env vars
+        - name: ENERGY_KAFKA_TOPIC
+          value: "energy_actual"
+        - name: ENERGY_FETCH_INTERVAL
+          value: "3600"  # 60 minutes
+        volumeMounts:
+        - name: code
+          mountPath: /app
+      volumes:
+      - name: code
+        persistentVolumeClaim:
+          claimName: weather-data-pvc
+      restartPolicy: Always
