@@ -1,0 +1,19 @@
+{
+  "name": "hdfs-sink-energy-predictions",
+  "config": {
+    "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
+    "topics.dir": "/user/hive/warehouse/energy_predictions_realtime",
+    "flush.size": "10",
+    "schema.compatibility": "NONE",
+    "tasks.max": "1",
+    "topics": "energy_predictions",
+    "hdfs.url": "hdfs://namenode:9000",
+    "rotate.interval.ms": "60000",
+    "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
+    "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
+    "value.converter.schemas.enable": "false",
+    "name": "hdfs-sink-energy-predictions",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter"
+  }
+}

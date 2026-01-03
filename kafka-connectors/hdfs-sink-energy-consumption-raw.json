@@ -1,0 +1,38 @@
+{
+  "name": "hdfs-sink-energy-consumption-raw",
+  "config": {
+    "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
+    "tasks.max": "1",
+    "topics": "energy_actual",
+    "hdfs.url": "hdfs://namenode:9000",
+    "flush.size": "10",
+    "rotate.interval.ms": "3600000",
+    "topics.dir": "/user/hive/warehouse/consumption_raw",
+    "logs.dir": "/tmp/logs",
+
+    "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
+    "parquet.codec": "snappy",
+
+    "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
+    "path.format": "'year'=YYYY/'month'=MM",
+    "partition.duration.ms": "2678400000",
+    "locale": "en-US",
+    "timezone": "UTC",
+    "timestamp.extractor": "Wallclock",
+
+    "hive.integration": "true",
+    "hive.metastore.uris": "thrift://hive-metastore:9083",
+    "hive.database": "default",
+    "hive.conf.dir": "/etc/hive",
+    "schema.compatibility": "BACKWARD",
+
+    "value.converter": "io.confluent.connect.avro.AvroConverter",
+    "value.converter.schema.registry.url": "http://kafka-schema-registry:8081",
+    "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+
+    "consumer.override.auto.offset.reset": "latest",
+
+    "errors.tolerance": "all",
+    "errors.log.enable": "true"
+  }
+}
