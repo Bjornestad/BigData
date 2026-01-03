@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
 Historical Weather Data Fetcher
-Fetches historical weather data from DMI API for all stations and all required parameters
-Aggregates to DK1/DK2 hourly format for ML training
+Fetches historical weather data from DMI API month-by-month
+Saves each month locally then copies to HDFS to avoid memory issues
 """
 
 import os
 import sys
 import json
+import argparse
 import requests
-from datetime import datetime, timedelta
+import subprocess
+from dateutil.relativedelta import relativedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import numpy as np
 from dotenv import load_dotenv
@@ -19,8 +22,8 @@ load_dotenv()
 # Configuration
 DMI_API_URL = "https://dmigw.govcloud.dk/v2/metObs/collections/observation/items"
 DMI_API_KEY = os.getenv("DMI_API_KEY", "b5800a05-4f0f-4584-b130-6129213728c0")
-DATA_DIR = "data"
-OUTPUT_PARQUET = os.path.join(DATA_DIR, "historical_weather_ml.parquet")
+DATA_DIR = "/tmp/historical_weather_monthly"
+HDFS_TARGET = "hdfs://namenode:9000/user/hive/warehouse/weather_observations_historical"
 
 # DK1 stations (West Denmark)
 DK1_STATIONS = [
@@ -64,29 +67,30 @@ REQUIRED_PARAMS = ["wind_speed", "wind_speed_past1h_max", "wind_dir",
                   "temp_mean_past1h", "humidity"]
 
 
-def fetch_station_data(station_id, start_date, end_date):
-    """Fetch all parameters for a single station"""
+def fetch_month_data(start_date, end_date):
+    """Fetch all observations for all stations in a given time period"""
     params = {
         'api-key': DMI_API_KEY,
-        'stationId': station_id,
         'datetime': f'{start_date.strftime("%Y-%m-%dT%H:%M:%SZ")}/{end_date.strftime("%Y-%m-%dT%H:%M:%SZ")}',
         'limit': 300000
     }
 
+    print(f"  Fetching {start_date.strftime('%Y-%m')}...", end=" ")
+
     try:
-        response = requests.get(DMI_API_URL, params=params, timeout=120)
+        response = requests.get(DMI_API_URL, params=params, timeout=300)
         response.raise_for_status()
         data = response.json()
         features = data.get('features', [])
-        print(f"  ✓ {station_id}: {len(features)} observations")
+        print(f"✓ {len(features):,} observations")
         return features
     except Exception as e:
-        print(f"  ✗ {station_id}: {e}")
+        print(f"✗ Error: {e}")
         return []
 
 
 def process_all_station_data(all_features):
-    """Process observations from all stations into hourly records"""
+    """Process observations from all stations into raw records suitable for Kafka/HDFS"""
     if not all_features:
         return pd.DataFrame()
 
@@ -95,155 +99,154 @@ def process_all_station_data(all_features):
         props = feature.get('properties', {})
         station_id = props.get('stationId')
         timestamp_str = props.get('observed')
+        param_id = props.get('parameterId')
+        value = props.get('value')
 
-        if not timestamp_str or not station_id:
+        if not timestamp_str or not station_id or not param_id:
+            continue
+
+        # Parse timestamp
+        try:
+            ts = pd.to_datetime(timestamp_str)
+        except:
             continue
 
         records.append({
-            'station_id': station_id,
-            'dk_area': STATION_TO_DK_AREA.get(station_id, 'UNKNOWN'),
-            'timestamp': timestamp_str,
-            'parameter_id': props.get('parameterId'),
-            'value': props.get('value'),
+            'stationId': station_id,
+            'parameterId': param_id,
+            'timeObserved': timestamp_str,
+            'value': float(value) if value is not None else None,
+            'year': ts.year,
+            'month': ts.month
         })
 
     if not records:
         return pd.DataFrame()
 
-    df = pd.DataFrame(records)
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['year'] = df['timestamp'].dt.year
-    df['month'] = df['timestamp'].dt.month
-    df['day'] = df['timestamp'].dt.day
-    df['hour'] = df['timestamp'].dt.hour
-
-    # Pivot to wide format per station
-    df_wide = df.pivot_table(
-        index=['station_id', 'dk_area', 'year', 'month', 'day', 'hour'],
-        columns='parameter_id',
-        values='value',
-        aggfunc='first'
-    ).reset_index()
-
-    df_wide.columns.name = None
-    return df_wide
+    return pd.DataFrame(records)
 
 
-def aggregate_to_dk_area_hourly(all_station_data):
-    """Aggregate all station data to DK area hourly format for ML"""
-    if all_station_data.empty:
-        return pd.DataFrame()
+def copy_to_hdfs(local_file, hdfs_path):
+    """Copy local file to HDFS"""
+    try:
+        # Create HDFS directory if it doesn't exist
+        subprocess.run(['hdfs', 'dfs', '-mkdir', '-p', os.path.dirname(hdfs_path)],
+                      check=False, capture_output=True)
 
-    # Group by dk_area, year, month, day, hour
-    grouped = all_station_data.groupby(['dk_area', 'year', 'month', 'day', 'hour'])
+        # Copy file to HDFS
+        result = subprocess.run(['hdfs', 'dfs', '-put', '-f', local_file, hdfs_path],
+                              check=True, capture_output=True, text=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"  ✗ Failed to copy to HDFS: {e.stderr}")
+        return False
 
-    aggregated_records = []
 
-    for (dk_area, year, month, day, hour), group_df in grouped:
-        record = {
-            'dk_area': dk_area,
-            'year': int(year),
-            'month': int(month),
-            'day': int(day),
-            'hour': int(hour),
-            'month_of_year': int(month),
-            'hour_of_day': int(hour),
-        }
+def fetch_batch(datetime_range, sort_order="observed,DESC"):
+    """Fetch a batch of observations"""
+    params = {
+        'api-key': DMI_API_KEY,
+        'datetime': datetime_range,
+        'sortorder': sort_order,
+        'limit': 300000
+    }
 
-        # Count stations
-        record['n_stations_wind'] = int(group_df['wind_speed'].notna().sum())
-        record['n_stations_solar'] = int(group_df['radia_glob_past1h'].notna().sum())
-
-        # Wind metrics
-        record['wind_speed_avg'] = group_df['wind_speed'].mean() if 'wind_speed' in group_df.columns else None
-        record['wind_speed_max'] = group_df['wind_speed_past1h_max'].max() if 'wind_speed_past1h_max' in group_df.columns else None
-
-        # Wind direction (convert to sin/cos and average)
-        if 'wind_dir' in group_df.columns:
-            wind_dirs = group_df['wind_dir'].dropna()
-            if len(wind_dirs) > 0:
-                wind_dirs_rad = np.deg2rad(wind_dirs)
-                sin_avg = np.sin(wind_dirs_rad).mean()
-                cos_avg = np.cos(wind_dirs_rad).mean()
-                record['wind_direction_sin'] = float(sin_avg)
-                record['wind_direction_cos'] = float(cos_avg)
-            else:
-                record['wind_direction_sin'] = None
-                record['wind_direction_cos'] = None
-        else:
-            record['wind_direction_sin'] = None
-            record['wind_direction_cos'] = None
-
-        # Solar metrics
-        record['solar_radiation_1h'] = group_df['radia_glob_past1h'].mean() if 'radia_glob_past1h' in group_df.columns else None
-        record['sunshine_duration_1h'] = group_df['sun_last1h_glob'].mean() if 'sun_last1h_glob' in group_df.columns else None
-        record['cloud_cover_avg'] = group_df['cloud_cover'].mean() if 'cloud_cover' in group_df.columns else None
-
-        # Temperature and humidity
-        record['temperature_avg'] = group_df['temp_mean_past1h'].mean() if 'temp_mean_past1h' in group_df.columns else None
-        record['humidity_avg'] = group_df['humidity'].mean() if 'humidity' in group_df.columns else None
-
-        # Create timestamp
-        try:
-            ts = datetime(year, month, day, hour, 0, 0)
-            record['timestamp'] = ts.isoformat()
-        except:
-            record['timestamp'] = None
-
-        aggregated_records.append(record)
-
-    return pd.DataFrame(aggregated_records)
+    try:
+        response = requests.get(DMI_API_URL, params=params, timeout=300)
+        response.raise_for_status()
+        data = response.json()
+        features = data.get('features', [])
+        return features
+    except Exception as e:
+        print(f"  ✗ Error: {e}")
+        return []
 
 
 def main():
-    """Main function"""
-    print("🌤️  Historical Weather Data Fetcher")
-    print(f"   DK1 Stations: {len(DK1_STATIONS)}")
-    print(f"   DK2 Stations: {len(DK2_STATIONS)}")
-    print(f"   Total Stations: {len(ALL_STATIONS)}")
+    """Main function - fetch in batches of 300k and copy to HDFS"""
+    parser = argparse.ArgumentParser(description='Fetch historical weather data in batches')
+    parser.add_argument('--start-date', type=str, required=True, help='Start date (YYYY-MM-DD)')
+    parser.add_argument('--end-date', type=str, required=True, help='End date (YYYY-MM-DD)')
+    args = parser.parse_args()
+
+    start_date = pd.to_datetime(args.start_date, utc=True)
+    end_date   = pd.to_datetime(args.end_date,   utc=True)
+    current_end = end_date
+
+    print("🌤️  Historical Weather Data Fetcher (Batch Mode)")
+    print(f"   Date Range: {start_date.date()} to {end_date.date()}")
+    print(f"   Batch Size: 300,000 records")
+    print(f"   Local Storage: {DATA_DIR}")
+    print(f"   HDFS Target: {HDFS_TARGET}")
     print("="*70)
 
-    # Date range - last 4 years
-    end_date = datetime.now()
-    start_date = datetime(2021, 1, 1)
-
-    print(f"\nDate Range: {start_date.date()} to {end_date.date()}")
-    print(f"\nFetching data from {len(ALL_STATIONS)} stations...")
-
-    all_features = []
-    for i, station_id in enumerate(ALL_STATIONS, 1):
-        print(f"[{i}/{len(ALL_STATIONS)}] Fetching {station_id} ({STATION_TO_DK_AREA[station_id]})...", end=" ")
-        features = fetch_station_data(station_id, start_date, end_date)
-        all_features.extend(features)
-
-    print(f"\n\nTotal observations fetched: {len(all_features):,}")
-
-    # Process data
-    print("\nProcessing station data...")
-    df_stations = process_all_station_data(all_features)
-    print(f"  Processed to {len(df_stations):,} station-hour records")
-
-    # Aggregate to DK area hourly
-    print("\nAggregating to DK area hourly...")
-    df_aggregated = aggregate_to_dk_area_hourly(df_stations)
-    print(f"  Aggregated to {len(df_aggregated):,} DK-area-hour records")
-
-    # Save to parquet
+    # Create local directory
     os.makedirs(DATA_DIR, exist_ok=True)
-    df_aggregated.to_parquet(OUTPUT_PARQUET, engine='pyarrow', compression='snappy', index=False)
-    file_size = os.path.getsize(OUTPUT_PARQUET)
-    print(f"\n✓ Saved to {OUTPUT_PARQUET}")
-    print(f"  File size: {file_size / 1024 / 1024:.2f} MB")
+
+    batch_num = 0
+    total_records = 0
+
+    print(f"\nFetching batches (newest to oldest)...\n")
+
+    while current_end >= start_date:
+        batch_num += 1
+        datetime_range = f'{start_date.strftime("%Y-%m-%dT%H:%M:%SZ")}/{current_end.strftime("%Y-%m-%dT%H:%M:%SZ")}'
+
+        print(f"[Batch {batch_num}] Fetching up to {current_end.strftime('%Y-%m-%d %H:%M')}...", end=" ")
+
+        features = fetch_batch(datetime_range, sort_order="observed,DESC")
+
+        if not features:
+            print("✗ No data returned, stopping")
+            break
+
+        print(f"✓ {len(features):,} observations")
+
+        # Process into raw format
+        df = process_all_station_data(features)
+
+        if df.empty:
+            print(f"  ⚠ No records after processing, stopping")
+            break
+
+        # Get the oldest timestamp in this batch
+        oldest_ts = pd.to_datetime(df["timeObserved"], utc=True).min()
+        print(f"  Oldest record: {oldest_ts}")
+
+        # Copy to HDFS directly (partitioned by year/month from the data)
+        for (year, month), group in df.groupby(['year', 'month']):
+            partition_file = os.path.join(DATA_DIR, f"temp_year={year}_month={month}_batch={batch_num}.parquet")
+            group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False)
+
+            hdfs_file = f"{HDFS_TARGET}/year={year}/month={month}/batch_{batch_num:04d}.parquet"
+            if copy_to_hdfs(partition_file, hdfs_file):
+                print(f"  ✓ HDFS: year={year}/month={month} ({len(group):,} records)")
+            else:
+                print(f"  ⚠ Failed to copy year={year}/month={month} to HDFS")
+
+            # Clean up temp file immediately
+            os.remove(partition_file)
+
+        total_records += len(df)
+
+        # Update current_end to fetch older data in next batch
+        # Subtract 1 second to avoid duplicate records
+        current_end = oldest_ts - pd.Timedelta(seconds=1)
+
+        # If we got less than 300k, we've reached the end
+        if len(features) < 300000:
+            print(f"  ℹ Batch smaller than limit, reached end of data")
+            break
+
+        print("")
 
     # Summary
-    print("\n=== Data Summary ===")
-    print(f"Date range: {df_aggregated['timestamp'].min()} to {df_aggregated['timestamp'].max()}")
-    print(f"DK1 records: {len(df_aggregated[df_aggregated['dk_area'] == 'DK1']):,}")
-    print(f"DK2 records: {len(df_aggregated[df_aggregated['dk_area'] == 'DK2']):,}")
-    print(f"\nSample data:")
-    print(df_aggregated.head())
-
-    print("\n✅ Done!")
+    print("\n" + "="*70)
+    print(f"✅ Complete!")
+    print(f"   Batches fetched: {batch_num}")
+    print(f"   Total records: {total_records:,}")
+    print(f"   Data location: {HDFS_TARGET}")
+    print("")
 
 
 if __name__ == "__main__":
