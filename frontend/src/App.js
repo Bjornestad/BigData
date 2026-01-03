@@ -31,8 +31,30 @@ function App() {
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
 
-  const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'ws://localhost:8080';
-  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8080';
+  // Dynamic URL generation for Kubernetes deployment
+  const getBackendUrls = () => {
+    const hostname = window.location.hostname;
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const httpProtocol = window.location.protocol;
+    
+    // If running in Kubernetes (not localhost), use ingress paths
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      return {
+        wsUrl: `${protocol}://${hostname}/ws`,
+        apiUrl: `${httpProtocol}//${hostname}/api`
+      };
+    }
+    
+    // Local development fallback
+    return {
+      wsUrl: process.env.REACT_APP_BACKEND_URL || 'ws://localhost:8080',
+      apiUrl: process.env.REACT_APP_API_URL || 'http://localhost:8080'
+    };
+  };
+
+  const { wsUrl: BACKEND_URL, apiUrl: API_URL } = getBackendUrls();
+  
+  console.log('Backend URLs:', { BACKEND_URL, API_URL });
 
   // Fetch historical data from database
   const fetchHistoricalData = useCallback(async (range, customStart = null, customEnd = null) => {
