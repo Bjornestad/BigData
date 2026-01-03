@@ -16,7 +16,7 @@ spec:
       containers:
       - name: fetcher
         image: dummystad/bigdata:fetcher-latest
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         command: ["/bin/bash", "-c"]
         args:
           - |

@@ -33,7 +33,7 @@ spec:
             mkdir -p models
 
             # Run the training script
-            python3 -u train_model.py
+            python3 -u train_consumption_model.py
 
             echo "Training complete. Models saved to /data/SparkML/models"
             ls -la models/

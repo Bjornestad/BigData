@@ -5,3 +5,7 @@ pyyaml
 kafka-python
 python-dotenv
 tqdm
+confluent-kafka[schema-registry]
+authlib
+jsonschema
+fastavro

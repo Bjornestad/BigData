@@ -30,4 +30,6 @@ spec:
           value: "energy_actual"
         - name: FETCH_INTERVAL
           value: "3600"  # 1 hour (energy data is timestamped hourly)
+        - name: DAYS_BACK
+          value: "10"
       restartPolicy: Always

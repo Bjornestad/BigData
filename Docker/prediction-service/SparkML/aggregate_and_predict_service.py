@@ -23,14 +23,14 @@ def find_latest_model(base_dir):
     """
     Find the most recent model in the given directory.
     Priority:
-    1. 'consumption_model' (standard output from training)
+    1. 'energy_model_consumption' (standard output from training)
     2. Newest directory matching 'energy_model*' or 'consumption*'
     """
     if not os.path.exists(base_dir):
         return None
         
     # 1. Check for standard fixed name
-    std_path = os.path.join(base_dir, "consumption_model")
+    std_path = os.path.join(base_dir, "energy_model_consumption")
     if os.path.exists(std_path):
         return std_path
         

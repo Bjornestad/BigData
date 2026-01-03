@@ -5,6 +5,7 @@ const { Pool } = require('pg');
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
 const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'power-consumption-actual';
 const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'power-consumption-predicted';
+const WEATHER_TOPIC = process.env.WEATHER_TOPIC || 'weather-data';
 const CONSUMER_GROUP = process.env.CONSUMER_GROUP || 'database-writer';
 const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/power_grid';
 const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || '1000');
@@ -13,7 +14,7 @@ const FLUSH_INTERVAL = parseInt(process.env.FLUSH_INTERVAL || '10000'); // 10 se
 console.log('Starting Database Writer Service');
 console.log('Configuration:');
 console.log('- Kafka Brokers:', KAFKA_BROKERS);
-console.log('- Topics:', [ACTUAL_TOPIC, PREDICTED_TOPIC]);
+console.log('- Topics:', [ACTUAL_TOPIC, PREDICTED_TOPIC, WEATHER_TOPIC]);
 console.log('- Consumer Group:', CONSUMER_GROUP);
 console.log('- Batch Size:', BATCH_SIZE);
 console.log('- Flush Interval:', FLUSH_INTERVAL, 'ms');
@@ -146,16 +147,24 @@ async function setupKafka() {
     console.log('✓ Connected to Kafka');
 
     await consumer.subscribe({ 
-      topics: [ACTUAL_TOPIC, PREDICTED_TOPIC],
+      topics: [ACTUAL_TOPIC, PREDICTED_TOPIC, WEATHER_TOPIC],
       fromBeginning: false 
     });
-    console.log(`✓ Subscribed to topics: ${ACTUAL_TOPIC}, ${PREDICTED_TOPIC}`);
+    console.log(`✓ Subscribed to topics: ${ACTUAL_TOPIC}, ${PREDICTED_TOPIC}, ${WEATHER_TOPIC}`);
 
     await consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
         try {
           const value = JSON.parse(message.value.toString());
-          const type = topic.includes('actual') ? 'actual' : 'predicted';
+          let type = '';
+
+          if (topic === ACTUAL_TOPIC) {
+            type = 'actual';
+          } else if (topic === PREDICTED_TOPIC) {
+            type = 'predicted';
+          } else if (topic === WEATHER_TOPIC) {
+            type = 'weather';
+          }
 
           // Extract value based on message structure
           let numericValue = 0;

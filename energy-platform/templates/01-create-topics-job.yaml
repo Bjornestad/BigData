@@ -24,5 +24,4 @@ spec:
               kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic weather_hourly_ml --partitions 3 --replication-factor 3
               kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic energy_predictions --partitions 3 --replication-factor 3
               kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic weather-live-ingest --partitions 3 --replication-factor 3 --config retention.ms=604800000
-              kafka-topics.sh --create --if-not-exists --bootstrap-server {{ .Release.Name }}-energy-cluster:9092 --topic energy-predictions-output --partitions 3 --replication-factor 3
               echo "Topics created successfully."
