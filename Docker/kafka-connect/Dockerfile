@@ -29,6 +29,11 @@ RUN echo 'Installing plugins...' && \
     rm -rf /tmp/jdbc* /tmp/hdfs* && \
     echo 'Plugins installed successfully!'
 
+# Remove bundled Hive JARs to prevent conflicts with Hive 3.1.3
+RUN echo 'Removing bundled Hive JARs...' && \
+    rm -f /plugins/kafka-connect-hdfs/lib/hive-*.jar && \
+    rm -f /plugins/kafka-connect-hdfs/lib/libfb303*.jar
+
 # Download Hive 3.1.3 dependencies for HDFS Sink Hive Integration
 # These are required for the connector to talk to the Hive Metastore
 RUN curl -L -o /plugins/kafka-connect-hdfs/lib/hive-metastore-3.1.3.jar https://repo1.maven.org/maven2/org/apache/hive/hive-metastore/3.1.3/hive-metastore-3.1.3.jar && \

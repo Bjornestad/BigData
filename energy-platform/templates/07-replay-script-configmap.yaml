@@ -16,7 +16,7 @@ data:
     # Configuration
     KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
     DATA_DIR = os.getenv("DATA_DIR", "/data")
-    WEATHER_TOPIC = "weather-data"
+    WEATHER_TOPIC = "weather_raw_avro"  # Updated to match HDFS Sink
     ENERGY_TOPIC = "energy_actual"
 
     # Wait settings

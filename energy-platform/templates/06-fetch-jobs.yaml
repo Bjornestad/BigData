@@ -8,14 +8,14 @@ data:
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: data-fetch-2021
+  name: fetch-historical-weather
 spec:
   ttlSecondsAfterFinished: 3600
   template:
     metadata:
       labels:
         app: data-fetch
-        year: "2021"
+        type: weather
     spec:
       restartPolicy: OnFailure
       initContainers:
@@ -34,260 +34,18 @@ spec:
         - name: fetcher
           image: dummystad/bigdata:fetcher-latest
           imagePullPolicy: Always
-          command: ["python", "/app/scripts/fetch_year_worker.py"]
+          command: ["python", "/app/scripts/fetch_historical_weather.py"]
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
+              memory: "512Mi"
+              cpu: "200m"
             limits:
-              memory: "1Gi"
-              cpu: "500m"
+              memory: "2Gi"
+              cpu: "1000m"
           env:
-            - name: YEAR
-              value: "2021"
             - name: DATA_DIR
               value: "/data"
-            - name: TEST_MODE
-              value: "false"
-            - name: LIGHT_MODE
-              value: "true"  # Fetch 1 month of data
-            - name: API_KEY
-              valueFrom:
-                configMapKeyRef:
-                  name: dmi-api-config
-                  key: API_KEY
-          volumeMounts:
-            - name: shared-data
-              mountPath: /data
-      volumes:
-        - name: shared-data
-          persistentVolumeClaim:
-            claimName: weather-data-pvc
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: data-fetch-2022
-spec:
-  ttlSecondsAfterFinished: 3600
-  template:
-    metadata:
-      labels:
-        app: data-fetch
-        year: "2022"
-    spec:
-      restartPolicy: OnFailure
-      initContainers:
-        - name: wait-for-hive
-          image: busybox:latest
-          command: [ "/bin/sh", "-c" ]
-          args:
-            - |
-              echo "Waiting for Hive Metastore..."
-              until nc -z -v -w30 hive-metastore 9083; do
-                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
-                sleep 5
-              done
-              echo "Hive Metastore is ready!"
-      containers:
-        - name: fetcher
-          image: dummystad/bigdata:fetcher-latest
-          imagePullPolicy: Always
-          command: ["python", "/app/scripts/fetch_year_worker.py"]
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
-              memory: "1Gi"
-              cpu: "500m"
-          env:
-            - name: YEAR
-              value: "2022"
-            - name: DATA_DIR
-              value: "/data"
-            - name: TEST_MODE
-              value: "false"
-            - name: LIGHT_MODE
-              value: "true"
-            - name: API_KEY
-              valueFrom:
-                configMapKeyRef:
-                  name: dmi-api-config
-                  key: API_KEY
-          volumeMounts:
-            - name: shared-data
-              mountPath: /data
-      volumes:
-        - name: shared-data
-          persistentVolumeClaim:
-            claimName: weather-data-pvc
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: data-fetch-2023
-spec:
-  ttlSecondsAfterFinished: 3600
-  template:
-    metadata:
-      labels:
-        app: data-fetch
-        year: "2023"
-    spec:
-      restartPolicy: OnFailure
-      initContainers:
-        - name: wait-for-hive
-          image: busybox:latest
-          command: [ "/bin/sh", "-c" ]
-          args:
-            - |
-              echo "Waiting for Hive Metastore..."
-              until nc -z -v -w30 hive-metastore 9083; do
-                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
-                sleep 5
-              done
-              echo "Hive Metastore is ready!"
-      containers:
-        - name: fetcher
-          image: dummystad/bigdata:fetcher-latest
-          imagePullPolicy: Always
-          command: ["python", "/app/scripts/fetch_year_worker.py"]
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
-              memory: "1Gi"
-              cpu: "500m"
-          env:
-            - name: YEAR
-              value: "2023"
-            - name: DATA_DIR
-              value: "/data"
-            - name: TEST_MODE
-              value: "false"
-            - name: LIGHT_MODE
-              value: "true"
-            - name: API_KEY
-              valueFrom:
-                configMapKeyRef:
-                  name: dmi-api-config
-                  key: API_KEY
-          volumeMounts:
-            - name: shared-data
-              mountPath: /data
-      volumes:
-        - name: shared-data
-          persistentVolumeClaim:
-            claimName: weather-data-pvc
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: data-fetch-2024
-spec:
-  ttlSecondsAfterFinished: 3600
-  template:
-    metadata:
-      labels:
-        app: data-fetch
-        year: "2024"
-    spec:
-      restartPolicy: OnFailure
-      initContainers:
-        - name: wait-for-hive
-          image: busybox:latest
-          command: [ "/bin/sh", "-c" ]
-          args:
-            - |
-              echo "Waiting for Hive Metastore..."
-              until nc -z -v -w30 hive-metastore 9083; do
-                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
-                sleep 5
-              done
-              echo "Hive Metastore is ready!"
-      containers:
-        - name: fetcher
-          image: dummystad/bigdata:fetcher-latest
-          imagePullPolicy: Always
-          command: ["python", "/app/scripts/fetch_year_worker.py"]
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
-              memory: "1Gi"
-              cpu: "500m"
-          env:
-            - name: YEAR
-              value: "2024"
-            - name: DATA_DIR
-              value: "/data"
-            - name: TEST_MODE
-              value: "false"
-            - name: LIGHT_MODE
-              value: "true"
-            - name: API_KEY
-              valueFrom:
-                configMapKeyRef:
-                  name: dmi-api-config
-                  key: API_KEY
-          volumeMounts:
-            - name: shared-data
-              mountPath: /data
-      volumes:
-        - name: shared-data
-          persistentVolumeClaim:
-            claimName: weather-data-pvc
----
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: data-fetch-2025
-spec:
-  ttlSecondsAfterFinished: 3600
-  template:
-    metadata:
-      labels:
-        app: data-fetch
-        year: "2025"
-    spec:
-      restartPolicy: OnFailure
-      initContainers:
-        - name: wait-for-hive
-          image: busybox:latest
-          command: [ "/bin/sh", "-c" ]
-          args:
-            - |
-              echo "Waiting for Hive Metastore..."
-              until nc -z -v -w30 hive-metastore 9083; do
-                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
-                sleep 5
-              done
-              echo "Hive Metastore is ready!"
-      containers:
-        - name: fetcher
-          image: dummystad/bigdata:fetcher-latest
-          imagePullPolicy: Always
-          command: ["python", "/app/scripts/fetch_year_worker.py"]
-          resources:
-            requests:
-              memory: "256Mi"
-              cpu: "100m"
-            limits:
-              memory: "1Gi"
-              cpu: "500m"
-          env:
-            - name: YEAR
-              value: "2025"
-            - name: DATA_DIR
-              value: "/data"
-            - name: TEST_MODE
-              value: "false"
-            - name: LIGHT_MODE
-              value: "true"
-            - name: API_KEY
+            - name: DMI_API_KEY
               valueFrom:
                 configMapKeyRef:
                   name: dmi-api-config
