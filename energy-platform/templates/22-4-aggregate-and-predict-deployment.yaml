@@ -30,9 +30,9 @@ spec:
         - name: OUTPUT_TOPIC
           value: "energy_predictions"
         # Point to the models on the shared PVC mounted at /data
-        # The training job saves them to /data/SparkML/models/consumption_model
+        # The training job saves them to /data/SparkML/models/energy_model_consumption
         - name: CONSUMPTION_MODEL_PATH
-          value: "/data/SparkML/models/consumption_model"
+          value: "/data/SparkML/models/energy_model_consumption"
         - name: CHECK_INTERVAL
           value: "600"  # 10 minutes
         - name: JAVA_HOME

@@ -68,7 +68,7 @@ else:
         CONSUMPTION_MODEL_PATH = found_path
     else:
         # Fallback to the baked-in default if nothing found
-        CONSUMPTION_MODEL_PATH = "./models/energy_model_consumption_20251227_235915"
+        CONSUMPTION_MODEL_PATH = "./models/spark_model_20251202_195034"
 
 print(f"""
 {'='*70}
@@ -86,8 +86,8 @@ Check Interval: {CHECK_INTERVAL}s ({CHECK_INTERVAL/60:.0f} min)
 print("Initializing Spark session...")
 spark = SparkSession.builder \
     .appName("AggregateAndPredict") \
-    .config("hive.metastore.uris", "thrift://hive-metastore:9083") \
     .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
+    .config("spark.hadoop.hive.metastore.uris", "thrift://hive-metastore:9083") \
     .config("spark.driver.memory", "2g") \
     .config("spark.sql.shuffle.partitions", "20") \
     .config("hive.exec.dynamic.partition", "true") \

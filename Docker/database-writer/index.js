@@ -1,8 +1,10 @@
 const { Kafka } = require('kafkajs');
+const { SchemaRegistry, SchemaType } = require('@kafkajs/confluent-schema-registry');
 const { Pool } = require('pg');
 
 // Configuration from environment variables
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
+const SCHEMA_REGISTRY_URL = process.env.SCHEMA_REGISTRY_URL || 'http://schema-registry:8081';
 const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'power-consumption-actual';
 const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'power-consumption-predicted';
 const WEATHER_TOPIC = process.env.WEATHER_TOPIC || 'weather-data';
@@ -14,6 +16,7 @@ const FLUSH_INTERVAL = parseInt(process.env.FLUSH_INTERVAL || '10000'); // 10 se
 console.log('Starting Database Writer Service');
 console.log('Configuration:');
 console.log('- Kafka Brokers:', KAFKA_BROKERS);
+console.log('- Schema Registry:', SCHEMA_REGISTRY_URL);
 console.log('- Topics:', [ACTUAL_TOPIC, PREDICTED_TOPIC, WEATHER_TOPIC]);
 console.log('- Consumer Group:', CONSUMER_GROUP);
 console.log('- Batch Size:', BATCH_SIZE);
@@ -46,6 +49,9 @@ const kafka = new Kafka({
     retries: 8
   }
 });
+
+// Initialize Schema Registry
+const registry = new SchemaRegistry({ host: SCHEMA_REGISTRY_URL });
 
 const consumer = kafka.consumer({ 
   groupId: CONSUMER_GROUP,
@@ -155,9 +161,17 @@ async function setupKafka() {
     await consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
         try {
-          const value = JSON.parse(message.value.toString());
-          let type = '';
+          let value;
 
+          // Try to decode with Schema Registry first
+          try {
+            value = await registry.decode(message.value);
+          } catch (e) {
+            // Fallback to JSON if not Avro (e.g. legacy messages or replay script)
+            value = JSON.parse(message.value.toString());
+          }
+
+          let type = '';
           if (topic === ACTUAL_TOPIC) {
             type = 'actual';
           } else if (topic === PREDICTED_TOPIC) {

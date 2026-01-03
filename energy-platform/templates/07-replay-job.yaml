@@ -3,10 +3,10 @@ kind: Job
 metadata:
   name: replay-history
   namespace: {{ .Release.Namespace }}
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "5"
-    "helm.sh/hook-delete-policy": before-hook-creation
+  # annotations:
+  #   "helm.sh/hook": post-install,post-upgrade
+  #   "helm.sh/hook-weight": "5"
+  #   "helm.sh/hook-delete-policy": before-hook-creation
 spec:
   template:
     spec:
@@ -15,7 +15,13 @@ spec:
         - name: replayer
           image: dummystad/bigdata:fetcher-latest
           imagePullPolicy: Always
-          command: ["python", "/app/scripts/replay_to_kafka.py"]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "Delaying replay start by 5 minutes..."
+              sleep 300
+              echo "Starting replay..."
+              python /app/scripts/replay_to_kafka.py
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "{{ .Release.Name }}-energy-cluster:9092"

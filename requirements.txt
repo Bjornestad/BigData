@@ -9,3 +9,5 @@ confluent-kafka[schema-registry]
 authlib
 jsonschema
 fastavro
+attrs
+httpx

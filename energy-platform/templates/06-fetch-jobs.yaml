@@ -299,3 +299,39 @@ spec:
         - name: shared-data
           persistentVolumeClaim:
             claimName: weather-data-pvc
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fetch-historical-energy
+spec:
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: data-fetch
+        type: energy
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: fetcher
+          image: dummystad/bigdata:fetcher-latest
+          imagePullPolicy: Always
+          command: ["python", "/app/scripts/fetch_historical_energy.py"]
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          env:
+            - name: DATA_DIR
+              value: "/data"
+          volumeMounts:
+            - name: shared-data
+              mountPath: /data
+      volumes:
+        - name: shared-data
+          persistentVolumeClaim:
+            claimName: weather-data-pvc

@@ -32,7 +32,12 @@ spec:
             # Ensure we can write to the models directory
             mkdir -p models
 
+            # Debug: List tables before running the script
+            echo "Verifying Hive tables before training..."
+            spark-sql -e "SHOW TABLES;"
+
             # Run the training script
+            echo "Running training script..."
             python3 -u train_consumption_model.py
 
             echo "Training complete. Models saved to /data/SparkML/models"

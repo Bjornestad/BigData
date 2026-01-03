@@ -14,8 +14,9 @@ from pyspark.ml.evaluation import RegressionEvaluator
 from pyspark.ml.tuning import TrainValidationSplit, ParamGridBuilder
 
 # Configuration
-MODEL_OUTPUT_PATH = "hdfs://namenode:9000/user/hive/warehouse/models"
-MODEL_NAME = "energy_consumption_model"
+# Save to local path (which is mounted to PVC in the job)
+MODEL_OUTPUT_PATH = "./models"
+MODEL_NAME = "energy_model_consumption"
 
 # Weather features - using Hive table column names directly
 WEATHER_FEATURES = [
@@ -57,10 +58,13 @@ TEST_MONTH = 11
 
 def create_spark_session():
     """Create Spark session with Hive support"""
+    metastore_uri = os.getenv("HIVE_METASTORE_URI", "thrift://hive-metastore:9083")
+    print(f"Connecting to Hive Metastore at: {metastore_uri}")
+    
     spark = SparkSession.builder \
         .appName("TrainConsumptionModel") \
         .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
-        .config("hive.metastore.uris", "thrift://hive-metastore:9083") \
+        .config("spark.hadoop.hive.metastore.uris", metastore_uri) \
         .config("spark.sql.parquet.enableVectorizedReader", "false") \
         .enableHiveSupport() \
         .master("local[*]") \
@@ -76,36 +80,48 @@ def load_and_join_data(spark):
     print("\n" + "="*70)
     print("LOADING DATA")
     print("="*70)
+    
+    # Debug: List available tables
+    print("Available tables in Hive:")
+    spark.sql("SHOW TABLES").show(truncate=False)
 
     # Load historical weather data from Hive table
     print("\nLoading historical weather data...")
-    weather_df = spark.sql("""
-                           SELECT
-                               *,
-                               CAST(n_stations AS INT) as n_stations_int
-                           FROM weather_area_hourly_historical
-                           """)
-    # Drop original n_stations and rename casted version
-    weather_df = weather_df.drop('n_stations').withColumnRenamed('n_stations_int', 'n_stations')
+    try:
+        weather_df = spark.sql("""
+                               SELECT
+                                   *,
+                                   CAST(n_stations AS INT) as n_stations_int
+                               FROM weather_area_hourly_historical
+                               """)
+        # Drop original n_stations and rename casted version
+        weather_df = weather_df.drop('n_stations').withColumnRenamed('n_stations_int', 'n_stations')
 
-    weather_count = weather_df.count()
-    print(f"  Weather records: {weather_count:,}")
+        weather_count = weather_df.count()
+        print(f"  Weather records: {weather_count:,}")
+    except Exception as e:
+        print(f"Error loading weather data: {e}")
+        raise
 
     # Load consumption data
     print("\nLoading consumption data...")
-    consumption_df = spark.sql("""
-                               SELECT
-                                   dk_area,
-                                   year,
-                                   month,
-                                   day,
-                                   hour,
-                                   consumption_mwh_area
-                               FROM consumption_area_hourly
-                               """)
+    try:
+        consumption_df = spark.sql("""
+                                   SELECT
+                                       dk_area,
+                                       year,
+                                       month,
+                                       day,
+                                       hour,
+                                       consumption_mwh_area
+                                   FROM consumption_area_hourly
+                                   """)
 
-    consumption_count = consumption_df.count()
-    print(f"  Consumption records: {consumption_count:,}")
+        consumption_count = consumption_df.count()
+        print(f"  Consumption records: {consumption_count:,}")
+    except Exception as e:
+        print(f"Error loading consumption data: {e}")
+        raise
 
     # Join on timestamp and area
     print("\nJoining weather and consumption data...")
@@ -273,7 +289,12 @@ def evaluate_model(model, test_df):
 def save_model(model):
     """Save the trained model"""
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Save to local directory (which is mounted to PVC)
     model_path = f"{MODEL_OUTPUT_PATH}/{MODEL_NAME}_{timestamp}"
+    
+    # Also save as "latest" for easier loading
+    latest_path = f"{MODEL_OUTPUT_PATH}/{MODEL_NAME}"
 
     print("\n" + "="*70)
     print(f"SAVING MODEL")
@@ -281,6 +302,19 @@ def save_model(model):
     print(f"\nSaving to: {model_path}")
 
     model.write().overwrite().save(model_path)
+    
+    print(f"Saving latest link to: {latest_path}")
+    model.write().overwrite().save(latest_path)
+    
+    # Also save to HDFS for archival/backup
+    hdfs_path = f"hdfs://namenode:9000/user/hive/warehouse/models/{MODEL_NAME}_{timestamp}"
+    print(f"Saving backup to HDFS: {hdfs_path}")
+    try:
+        model.write().overwrite().save(hdfs_path)
+        print("✓ Backup saved to HDFS")
+    except Exception as e:
+        print(f"⚠ Warning: Could not save backup to HDFS: {e}")
+
     print("✓ Model saved successfully")
 
     return model_path

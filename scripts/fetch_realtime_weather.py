@@ -25,7 +25,7 @@ DMI_API_KEY = os.getenv("DMI_API_KEY", "b5800a05-4f0f-4584-b130-6129213728c0")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
 SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://kafka-schema-registry:8081")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_raw")
-FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "600"))  # 10 minutes default
+FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "300"))  # 5 minutes default
 
 # All weather stations - will get from Hive station_metadata
 # For now, fetching from ALL stations (DMI API will return data for active ones)

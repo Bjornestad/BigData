@@ -1,4 +1,5 @@
 const { Kafka } = require('kafkajs');
+const { SchemaRegistry, SchemaType } = require('@kafkajs/confluent-schema-registry');
 const WebSocket = require('ws');
 const express = require('express');
 const http = require('http');
@@ -8,6 +9,7 @@ const { URL } = require('url');
 
 // Configuration from environment variables
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
+const SCHEMA_REGISTRY_URL = process.env.SCHEMA_REGISTRY_URL || 'http://schema-registry:8081';
 const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'energy_actual';
 const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'energy_predictions';
 const PORT = process.env.PORT || 8080;
@@ -28,6 +30,9 @@ const kafka = new Kafka({
     retries: 15
   }
 });
+
+// Initialize Schema Registry
+const registry = new SchemaRegistry({ host: SCHEMA_REGISTRY_URL });
 
 const consumer = kafka.consumer({ groupId: CONSUMER_GROUP });
 
@@ -316,7 +321,15 @@ async function setupKafka() {
     await consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
         try {
-          const value = JSON.parse(message.value.toString());
+          let value;
+
+          // Try to decode with Schema Registry first
+          try {
+            value = await registry.decode(message.value);
+          } catch (e) {
+            // Fallback to JSON if not Avro
+            value = JSON.parse(message.value.toString());
+          }
           
           if (topic === ACTUAL_TOPIC) {
             const dataPoint = {

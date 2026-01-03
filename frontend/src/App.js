@@ -145,6 +145,7 @@ function App() {
 
       ws.onmessage = (event) => {
         const message = JSON.parse(event.data);
+        console.log('WebSocket Message Received:', message); // Added logging
 
         if (message.type === 'initial') {
           const combined = {};

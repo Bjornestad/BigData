@@ -33,16 +33,18 @@ data:
             if os.path.exists(DATA_DIR):
                 files = os.listdir(DATA_DIR)
                 weather_files = [f for f in files if f.startswith("dmi_weather_") and f.endswith(".parquet")]
-                energy_files = [f for f in files if f.startswith("energy_production_") and f.endswith(".parquet")]
+                # Check for single energy file
+                energy_file = os.path.join(DATA_DIR, "historical_energy_ml.parquet")
+                has_energy = os.path.exists(energy_file)
 
-                if weather_files or energy_files:
-                    print(f"Found {len(weather_files)} weather files and {len(energy_files)} energy files.")
-                    total_files = len(weather_files) + len(energy_files)
-                    if total_files >= 5:
-                        print("Sufficient data found. Starting replay.")
+                if weather_files or has_energy:
+                    print(f"Found {len(weather_files)} weather files and {'1' if has_energy else '0'} energy files.")
+                    # Wait for at least 1 weather file and the energy file
+                    if len(weather_files) >= 1 and has_energy:
+                        print("Sufficient data found. Starting bulk load.")
                         return True
                     else:
-                        print(f"Found {total_files} files. Waiting for more...")
+                        print(f"Waiting for more data...")
 
             elapsed = (time.time() - start_time) / 60
             if elapsed > MAX_WAIT_MINUTES:
@@ -57,7 +59,10 @@ data:
             producer = KafkaProducer(
                 bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-                retries=5
+                retries=5,
+                batch_size=131072,  # 128KB batch size for higher throughput
+                linger_ms=20,       # Wait up to 20ms to group batches
+                compression_type='gzip' # Compress to save bandwidth
             )
             print(f"Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
             return producer
@@ -75,127 +80,114 @@ data:
                 cleaned[k] = v
         return cleaned
 
-    def replay_weather_data(producer):
-        """Replay weather data from Parquet files to Kafka."""
-        print("Replaying weather data...")
+    def process_energy_record(record):
+        """Normalize energy record fields."""
+        record = clean_record(record)
 
-        files = [f for f in os.listdir(DATA_DIR) if f.startswith("dmi_weather_") and f.endswith(".parquet")]
-        files.sort()
+        # 1. Map Area
+        if 'dk_area' not in record:
+            if 'PriceArea' in record:
+                record['dk_area'] = record['PriceArea']
+            elif 'MunicipalityNo' in record:
+                try:
+                    muni = int(record['MunicipalityNo'])
+                    record['dk_area'] = 'DK1' if muni < 400 else 'DK2'
+                except:
+                    record['dk_area'] = 'Unknown'
 
-        if not files:
-            print("No weather data files found.")
-            return
+        # 2. Calculate Total Production
+        if 'total_production_mwh' not in record:
+            prod = 0.0
+            for col in ['SolarMWh', 'OnshoreWindMWh', 'OffshoreWindLt100MW_MWh', 'OffshoreWindGe100MW_MWh', 'ThermalPowerMWh']:
+                if col in record and record[col] is not None:
+                    prod += float(record[col])
+            record['total_production_mwh'] = prod
 
-        for file in files:
+        # 3. Map Consumption
+        if 'total_consumption_mwh' not in record:
+            if 'GrossConsumptionMWh' in record:
+                record['total_consumption_mwh'] = record['GrossConsumptionMWh']
+            elif 'ConsumptionMWh' in record:
+                record['total_consumption_mwh'] = record['ConsumptionMWh']
+            elif 'Consumption' in record:
+                record['total_consumption_mwh'] = record['Consumption']
+            else:
+                record['total_consumption_mwh'] = 0.0
+
+        if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
+            record['timestamp'] = record['timestamp'].isoformat()
+        if 'date' in record:
+            record['date'] = str(record['date'])
+
+        return record
+
+    def process_weather_record(record):
+        """Normalize weather record fields."""
+        record = clean_record(record)
+        if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
+            record['timestamp'] = record['timestamp'].isoformat()
+        if 'date' in record:
+            record['date'] = str(record['date'])
+        return record
+
+    def bulk_load_data(producer):
+        """Load all data and push to Kafka as fast as possible."""
+        print("Scanning for files...")
+
+        # Load Energy FIRST (Single File)
+        energy_file = os.path.join(DATA_DIR, "historical_energy_ml.parquet")
+        if os.path.exists(energy_file):
+            print(f"Processing energy file: {energy_file}")
+            try:
+                df = pd.read_parquet(energy_file)
+                records = df.to_dict(orient='records')
+                print(f"  -> Sending {len(records)} records...")
+
+                for record in records:
+                    payload = process_energy_record(record)
+                    producer.send(ENERGY_TOPIC, payload)
+
+                producer.flush()
+            except Exception as e:
+                print(f"Error processing {energy_file}: {e}")
+        else:
+            print(f"Warning: Energy file {energy_file} not found.")
+
+        # Load Weather SECOND (Multiple Files)
+        weather_files = [f for f in os.listdir(DATA_DIR) if f.startswith("dmi_weather_") and f.endswith(".parquet")]
+        weather_files.sort()
+
+        for file in weather_files:
             filepath = os.path.join(DATA_DIR, file)
-            print(f"Processing {file}...")
-
+            print(f"Processing weather file: {file}")
             try:
                 df = pd.read_parquet(filepath)
                 records = df.to_dict(orient='records')
-
-                # DEBUG: Print first record keys
-                if records:
-                    print(f"DEBUG: Weather record keys: {list(records[0].keys())}")
+                print(f"  -> Sending {len(records)} records...")
 
                 for record in records:
-                    record = clean_record(record)
-                    if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
-                        record['timestamp'] = record['timestamp'].isoformat()
-                    if 'date' in record:
-                        record['date'] = str(record['date'])
-
-                    producer.send(WEATHER_TOPIC, record)
+                    payload = process_weather_record(record)
+                    producer.send(WEATHER_TOPIC, payload)
 
                 producer.flush()
-                print(f"Sent {len(records)} weather records from {file}")
-
             except Exception as e:
                 print(f"Error processing {file}: {e}")
 
-    def replay_energy_data(producer):
-        """Replay energy data from Parquet files to Kafka."""
-        print("Replaying energy data...")
-
-        files = [f for f in os.listdir(DATA_DIR) if f.startswith("energy_production_") and f.endswith(".parquet")]
-        files.sort()
-
-        if not files:
-            print("No energy data files found.")
-            return
-
-        for file in files:
-            filepath = os.path.join(DATA_DIR, file)
-            print(f"Processing {file}...")
-
-            try:
-                df = pd.read_parquet(filepath)
-                records = df.to_dict(orient='records')
-
-                # DEBUG: Print first record keys
-                if records:
-                    print(f"DEBUG: Energy record keys: {list(records[0].keys())}")
-
-                for record in records:
-                    record = clean_record(record)
-
-                    # 1. Map Area: Use MunicipalityNo if dk_area is missing
-                    if 'dk_area' not in record:
-                        if 'PriceArea' in record:
-                            record['dk_area'] = record['PriceArea']
-                        elif 'MunicipalityNo' in record:
-                            # Map municipality to DK1/DK2
-                            # Simple heuristic: < 400 is DK1, >= 400 is DK2
-                            try:
-                                muni = int(record['MunicipalityNo'])
-                                record['dk_area'] = 'DK1' if muni < 400 else 'DK2'
-                            except:
-                                record['dk_area'] = 'Unknown'
-
-                    # 2. Calculate Total Production (Transformation)
-                    if 'total_production_mwh' not in record:
-                        prod = 0.0
-                        # Sum known production columns
-                        for col in ['SolarMWh', 'OnshoreWindMWh', 'OffshoreWindLt100MW_MWh', 'OffshoreWindGe100MW_MWh', 'ThermalPowerMWh']:
-                            if col in record and record[col] is not None:
-                                prod += float(record[col])
-                        record['total_production_mwh'] = prod
-
-                    # 3. Map Consumption
-                    if 'total_consumption_mwh' not in record:
-                        if 'GrossConsumptionMWh' in record:
-                            record['total_consumption_mwh'] = record['GrossConsumptionMWh']
-                        elif 'ConsumptionMWh' in record:
-                            record['total_consumption_mwh'] = record['ConsumptionMWh']
-                        elif 'Consumption' in record:
-                            record['total_consumption_mwh'] = record['Consumption']
-                        else:
-                            record['total_consumption_mwh'] = 0.0
-
-                    if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
-                        record['timestamp'] = record['timestamp'].isoformat()
-                    if 'date' in record:
-                        record['date'] = str(record['date'])
-
-                    producer.send(ENERGY_TOPIC, record)
-
-                producer.flush()
-                print(f"Sent {len(records)} energy records from {file}")
-
-            except Exception as e:
-                print(f"Error processing {file}: {e}")
+        print("Bulk load complete.")
 
     def main():
-        print("Starting replay job...")
+        print("Starting Bulk Loader Job...")
         wait_for_data()
-        time.sleep(10)
+        time.sleep(2)
+
         producer = create_producer()
         if not producer:
             return
-        replay_weather_data(producer)
-        replay_energy_data(producer)
+
+        bulk_load_data(producer)
+
         producer.close()
-        print("Replay job completed.")
+        print("Job finished successfully.")
 
     if __name__ == "__main__":
         main()
