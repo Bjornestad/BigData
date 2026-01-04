@@ -78,14 +78,21 @@ let stats = {
 async function flushBatch() {
   if (batch.length === 0) return;
   
-  // Deduplicate batch: keep only the last entry for each (time, type) pair
-  const uniqueEntries = new Map();
+  // Aggregate batch: SUM values for each (time, type) pair
+  // This handles the case where multiple records exist for the same timestamp (e.g. different areas)
+  const aggregatedEntries = new Map();
   batch.forEach(item => {
     const key = `${item.time}_${item.type}`;
-    uniqueEntries.set(key, item);
+    if (aggregatedEntries.has(key)) {
+        const existing = aggregatedEntries.get(key);
+        existing.value += item.value;
+    } else {
+        // Clone item to avoid modifying original batch if we needed it
+        aggregatedEntries.set(key, { ...item });
+    }
   });
 
-  const batchToFlush = Array.from(uniqueEntries.values());
+  const batchToFlush = Array.from(aggregatedEntries.values());
   batch = []; // Clear the original batch
   
   const startTime = Date.now();
@@ -102,6 +109,10 @@ async function flushBatch() {
       item.type
     ]);
     
+    // Use ON CONFLICT DO UPDATE SET value = EXCLUDED.value
+    // Note: This overwrites the DB value with the new SUM from this batch.
+    // Ideally, we should do value = measurements.value + EXCLUDED.value, but that risks double-counting on replay.
+    // Since we process in batches, and a batch likely contains all areas for a timestamp, overwriting with the batch sum is safer.
     const query = `
       INSERT INTO measurements (time, value, type) 
       VALUES ${values}
@@ -118,7 +129,7 @@ async function flushBatch() {
     stats.lastFlush = new Date().toISOString();
     lastFlushTime = Date.now();
     
-    console.log(`✓ Flushed ${batchToFlush.length} records in ${duration}ms (total: ${totalWritten})`);
+    console.log(`✓ Flushed ${batchToFlush.length} aggregated records in ${duration}ms (total: ${totalWritten})`);
   } catch (error) {
     console.error('✗ Database write error:', error.message);
     totalErrors++;
@@ -171,6 +182,15 @@ async function setupKafka() {
             value = JSON.parse(message.value.toString());
           }
 
+          // DEBUG: Log the decoded message to see structure
+          // Log first 5 messages of each batch or random sample
+          if (Math.random() < 0.001 || stats.messagesReceived < 5) {
+             console.log(`[DEBUG] Topic: ${topic}, Decoded keys:`, Object.keys(value));
+             if (topic === ACTUAL_TOPIC) {
+                 console.log(`[DEBUG] ShareMWh: ${value.ShareMWh}, Type: ${typeof value.ShareMWh}`);
+             }
+          }
+
           let type = '';
           if (topic === ACTUAL_TOPIC) {
             type = 'actual';
@@ -190,11 +210,22 @@ async function setupKafka() {
             numericValue = parseFloat(value.total_production_mwh);
           } else if (value.predictions && value.predictions.consumption_mwh !== undefined) {
              numericValue = parseFloat(value.predictions.consumption_mwh);
+          } else if (value.ShareMWh !== undefined) {
+             // Handle Realtime Energy Fetcher format
+             numericValue = parseFloat(value.ShareMWh);
+          }
+
+          // Extract timestamp
+          let timestamp = value.timestamp;
+          if (!timestamp) {
+             if (value.HourUTC) timestamp = value.HourUTC;
+             else if (value.observed) timestamp = value.observed;
+             else timestamp = new Date().toISOString();
           }
 
           // Add to batch
           batch.push({
-            time: value.timestamp || new Date().toISOString(),
+            time: timestamp,
             value: numericValue,
             type: type
           });

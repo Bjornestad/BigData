@@ -15,7 +15,7 @@ from pyspark.ml.tuning import TrainValidationSplit, ParamGridBuilder
 
 # Configuration
 # Save to local path (which is mounted to PVC in the job)
-MODEL_OUTPUT_PATH = "./models"
+MODEL_OUTPUT_PATH = "/data/SparkML/models"
 MODEL_NAME = "energy_model_consumption"
 
 # Weather features - using Hive table column names directly

@@ -19,44 +19,37 @@ spec:
     spec:
       restartPolicy: OnFailure
       initContainers:
-        - name: wait-for-hive
+        - name: wait-for-namenode
           image: busybox:latest
           command: [ "/bin/sh", "-c" ]
           args:
             - |
-              echo "Waiting for Hive Metastore..."
-              until nc -z -v -w30 hive-metastore 9083; do
-                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
+              echo "Waiting for NameNode..."
+              until nc -z -v -w30 namenode 9000; do
+                echo "Waiting for NameNode (namenode:9000)..."
                 sleep 5
               done
-              echo "Hive Metastore is ready!"
+              echo "NameNode is ready!"
       containers:
         - name: fetcher
           image: dummystad/bigdata:fetcher-latest
           imagePullPolicy: Always
           command: ["python", "/app/scripts/fetch_historical_weather.py"]
+          args: ["--start-date", "2021-01-01", "--end-date", "2026-01-01"]
           resources:
             requests:
-              memory: "512Mi"
-              cpu: "200m"
+              memory: "1Gi"
+              cpu: "500m"
             limits:
-              memory: "2Gi"
+              memory: "4Gi"
               cpu: "1000m"
           env:
-            - name: DATA_DIR
-              value: "/data"
             - name: DMI_API_KEY
               valueFrom:
                 configMapKeyRef:
                   name: dmi-api-config
                   key: API_KEY
-          volumeMounts:
-            - name: shared-data
-              mountPath: /data
-      volumes:
-        - name: shared-data
-          persistentVolumeClaim:
-            claimName: weather-data-pvc
+      # No volume mount needed for data, as it uploads directly to HDFS
 ---
 apiVersion: batch/v1
 kind: Job
@@ -71,25 +64,28 @@ spec:
         type: energy
     spec:
       restartPolicy: OnFailure
+      initContainers:
+        - name: wait-for-namenode
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for NameNode..."
+              until nc -z -v -w30 namenode 9000; do
+                echo "Waiting for NameNode (namenode:9000)..."
+                sleep 5
+              done
+              echo "NameNode is ready!"
       containers:
         - name: fetcher
           image: dummystad/bigdata:fetcher-latest
           imagePullPolicy: Always
           command: ["python", "/app/scripts/fetch_historical_energy.py"]
+          args: ["--start-date", "2021-01-01", "--end-date", "2026-01-01"]
           resources:
             requests:
-              memory: "256Mi"
-              cpu: "100m"
+              memory: "512Mi"
+              cpu: "200m"
             limits:
-              memory: "1Gi"
-              cpu: "500m"
-          env:
-            - name: DATA_DIR
-              value: "/data"
-          volumeMounts:
-            - name: shared-data
-              mountPath: /data
-      volumes:
-        - name: shared-data
-          persistentVolumeClaim:
-            claimName: weather-data-pvc
+              memory: "2Gi"
+              cpu: "1000m"

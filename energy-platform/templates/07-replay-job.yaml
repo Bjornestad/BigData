@@ -3,14 +3,22 @@ kind: Job
 metadata:
   name: replay-history
   namespace: {{ .Release.Namespace }}
-  # annotations:
-  #   "helm.sh/hook": post-install,post-upgrade
-  #   "helm.sh/hook-weight": "5"
-  #   "helm.sh/hook-delete-policy": before-hook-creation
 spec:
   template:
     spec:
       restartPolicy: Never
+      initContainers:
+        - name: wait-for-namenode
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for NameNode..."
+              until nc -z -v -w30 namenode 9000; do
+                echo "Waiting for NameNode (namenode:9000)..."
+                sleep 5
+              done
+              echo "NameNode is ready!"
       containers:
         - name: replayer
           image: dummystad/bigdata:fetcher-latest
@@ -18,25 +26,24 @@ spec:
           command: ["/bin/sh", "-c"]
           args:
             - |
-              echo "Delaying replay start by 5 minutes..."
-              sleep 300
-              echo "Starting replay..."
+              echo "Waiting for Kafka..."
+              until python -c "import socket; s=socket.socket(); s.settimeout(5); s.connect(('{{ .Release.Name }}-energy-cluster', 9092))" 2>/dev/null; do
+                echo "Waiting for Kafka ({{ .Release.Name }}-energy-cluster:9092)..."
+                sleep 5
+              done
+              echo "Kafka is ready!"
+
+              echo "Starting replay from HDFS..."
               python /app/scripts/replay_to_kafka.py
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "{{ .Release.Name }}-energy-cluster:9092"
-            - name: DATA_DIR
-              value: "/data"
+            # No DATA_DIR needed, uses HDFS paths hardcoded in script
           volumeMounts:
-            - name: shared-data
-              mountPath: /data
             - name: replay-script
               mountPath: /app/scripts/replay_to_kafka.py
               subPath: replay_to_kafka.py
       volumes:
-        - name: shared-data
-          persistentVolumeClaim:
-            claimName: weather-data-pvc
         - name: replay-script
           configMap:
             name: replay-script

@@ -219,9 +219,13 @@ app.post('/api/historical', async (req, res) => {
       `;
       params = [selectedInterval, startDate, endDate, type || null];
     }
-    
+
+    console.log(`[DEBUG] Querying historical data: ${selectedInterval}, Table: ${tableName}, Range: ${startDate.toISOString()} - ${endDate.toISOString()}`);
+
     const result = await pool.query(query, params);
-    
+
+    console.log(`[DEBUG] Query returned ${result.rows.length} rows. First row:`, result.rows[0]);
+
     res.json({
       data: result.rows,
       metadata: {
@@ -333,8 +337,8 @@ async function setupKafka() {
           
           if (topic === ACTUAL_TOPIC) {
             const dataPoint = {
-              timestamp: value.timestamp || new Date().toISOString(),
-              value: parseFloat(value.total_consumption_mwh || value.value || 0),
+              timestamp: value.timestamp || value.HourUTC || value.HourDK || new Date().toISOString(),
+              value: parseFloat(value.total_consumption_mwh || value.value || value.ShareMWh || 0),
               production: parseFloat(value.total_production_mwh || 0),
               dk_area: value.dk_area,
               type: 'actual'
@@ -353,7 +357,7 @@ async function setupKafka() {
             console.log('Actual:', dataPoint.value.toFixed(2), 'MW');
           } else if (topic === PREDICTED_TOPIC) {
             const dataPoint = {
-              timestamp: value.timestamp || new Date().toISOString(),
+              timestamp: value.timestamp || value.HourUTC || value.HourDK || new Date().toISOString(),
               value: parseFloat(value.predictions?.consumption_mwh || value.value || 0),
               production: parseFloat(value.predictions?.production_mwh || 0),
               net_balance: parseFloat(value.predictions?.net_balance_mwh || 0),

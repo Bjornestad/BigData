@@ -38,9 +38,11 @@ spec:
 
             echo ""
             echo "================================================================"
-            echo "CREATING HDFS SINK #1: weather_raw_avro (PARQUET + HIVE)"
+            echo "CREATING HDFS SINK #1: weather_raw_avro (PARQUET ONLY)"
             echo "================================================================"
 
+            # Note: hive.integration is FALSE because we create tables manually in create-historical-hive-tables job
+            # This avoids dependency hell with HCatalog JARs in Kafka Connect
             curl -X POST $CONNECT_URL/connectors \
               -H "Content-Type: application/json" \
               -d '{
@@ -57,8 +59,7 @@ spec:
                 "locale": "en-US",
                 "logs.dir": "/tmp/logs",
                 "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
-                "hive.integration": "true",
-                "hive.conf.dir": "/etc/hive",
+                "hive.integration": "false",
                 "value.converter": "io.confluent.connect.avro.AvroConverter",
                 "errors.log.enable": "true",
                 "key.converter": "org.apache.kafka.connect.storage.StringConverter",
@@ -67,7 +68,6 @@ spec:
                 "topics": "weather_raw_avro",
                 "parquet.codec": "snappy",
                 "hdfs.url": "hdfs://namenode:9000",
-                "hive.metastore.uris": "thrift://hive-metastore:9083",
                 "value.converter.schema.registry.url": "http://schema-registry:8081",
                 "consumer.override.auto.offset.reset": "latest",
                 "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
@@ -81,7 +81,7 @@ spec:
             echo ""
             echo ""
             echo "================================================================"
-            echo "CREATING HDFS SINK #2: energy_actual (PARQUET + HIVE)"
+            echo "CREATING HDFS SINK #2: energy_actual (PARQUET ONLY)"
             echo "================================================================"
 
             curl -X POST $CONNECT_URL/connectors \
@@ -105,10 +105,7 @@ spec:
                 "locale": "en-US",
                 "timezone": "UTC",
                 "timestamp.extractor": "Wallclock",
-                "hive.integration": "true",
-                "hive.metastore.uris": "thrift://hive-metastore:9083",
-                "hive.database": "default",
-                "hive.conf.dir": "/etc/hive",
+                "hive.integration": "false",
                 "schema.compatibility": "BACKWARD",
                 "value.converter": "io.confluent.connect.avro.AvroConverter",
                 "value.converter.schema.registry.url": "http://schema-registry:8081",

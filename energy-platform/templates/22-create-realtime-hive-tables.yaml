@@ -44,63 +44,76 @@ spec:
             # Create SQL script
             cat > /tmp/create_historical_tables.sql << 'EOFHIVE'
 
-            -- 1. Raw Weather Data (from fetch_year_worker -> load-data-to-hdfs)
-            -- Location: /user/hive/warehouse/weather_wind_solar_area_hourly/historical
-            CREATE EXTERNAL TABLE IF NOT EXISTS weather_raw_historical (
-              station_id STRING,
-              station_name STRING,
-              parameter_id STRING,
-              timestamp TIMESTAMP,
+            -- Drop old tables to ensure schema update
+            DROP TABLE IF EXISTS weather_raw_historical;
+            DROP TABLE IF EXISTS energy_raw_historical;
+            DROP TABLE IF EXISTS weather_raw_avro;
+            DROP VIEW IF EXISTS weather_area_hourly_historical;
+            DROP VIEW IF EXISTS consumption_area_hourly;
+
+            -- 1. Raw Weather Data (from fetch-historical-weather job)
+            -- Location: /user/hive/warehouse/weather_observations_historical
+            -- Schema matches process_all_station_data in fetch_historical_weather.py
+            CREATE EXTERNAL TABLE weather_raw_historical (
+              stationId STRING,
+              parameterId STRING,
+              timeObserved STRING,
               value DOUBLE,
-              longitude DOUBLE,
-              latitude DOUBLE,
-              date DATE,
-              hour INT,
               year INT,
-              month INT,
-              day INT
-            ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/weather_wind_solar_area_hourly/historical';
+              month INT
+            ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/weather_observations_historical';
 
-            -- 2. Raw Energy Data (from fetch_year_worker -> load-data-to-hdfs)
-            -- Location: /user/hive/warehouse/energy_by_municipality/historical
-            CREATE EXTERNAL TABLE IF NOT EXISTS energy_raw_historical (
-              MunicipalityNo STRING,
-              timestamp TIMESTAMP,
-              ConsumptionMWh DOUBLE,
-              ProductionGe100kW DOUBLE,
-              ProductionLt100kW DOUBLE,
-              SolarMWh DOUBLE,
-              OnshoreWindMWh DOUBLE,
-              OffshoreWindLt100MW_MWh DOUBLE,
-              OffshoreWindGe100MW_MWh DOUBLE,
-              ThermalPowerMWh DOUBLE,
-              date DATE,
-              hour INT,
+            -- 2. Raw Energy Data (from fetch-historical-energy job)
+            -- Location: /user/hive/warehouse/energy_actual
+            -- Schema matches process_batch_data in fetch_historical_energy.py
+            CREATE EXTERNAL TABLE energy_raw_historical (
+              HourUTC STRING,
+              HourDK STRING,
+              PriceArea STRING,
+              ConnectedArea STRING,
+              ViaArea STRING,
+              SharePPM DOUBLE,
+              ShareMWh DOUBLE,
+              Updated STRING,
               year INT,
-              month INT,
-              day INT
-            ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/energy_by_municipality/historical';
+              month INT
+            ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/energy_actual';
 
-            -- 3. Aggregated Views (to match what ML script expects)
+            -- 3. Realtime Weather Data (from Kafka Connect)
+            -- This table is usually created by Kafka Connect, but we pre-create it to ensure Spark can see it
+            CREATE EXTERNAL TABLE weather_raw_avro (
+              stationId STRING,
+              parameterId STRING,
+              timeObserved STRING,
+              value DOUBLE
+            )
+            PARTITIONED BY (year INT, month INT, day INT)
+            STORED AS AVRO
+            LOCATION 'hdfs://namenode:9000/user/hive/warehouse/weather_raw_avro';
+
+            -- 4. Aggregated Views (to match what ML script expects)
 
             -- View for Weather Aggregation (weather_area_hourly_historical)
             -- Aggregates raw station data to DK area level
-            CREATE VIEW IF NOT EXISTS weather_area_hourly_historical AS
+            -- Note: We need to parse timeObserved string to timestamp
+            CREATE VIEW weather_area_hourly_historical AS
             SELECT
               CASE
-                WHEN station_id IN ('06186', '06180', '06190', '06135', '06138', '06141', '06151', '06156', '06159', '06168', '06169', '06170', '06181', '06183', '06187', '06188', '06193') THEN 'DK2'
+                WHEN stationId IN ('06186', '06180', '06190', '06135', '06138', '06141', '06151', '06156', '06159', '06168', '06169', '06170', '06181', '06183', '06187', '06188', '06193') THEN 'DK2'
                 ELSE 'DK1'
               END as dk_area,
-              year, month, day, hour,
-              AVG(CASE WHEN parameter_id = 'temp_dry' THEN value END) as temp_mean_area,
-              MAX(CASE WHEN parameter_id = 'temp_dry' THEN value END) as temp_max_area,
-              MIN(CASE WHEN parameter_id = 'temp_dry' THEN value END) as temp_min_area,
-              AVG(CASE WHEN parameter_id = 'wind_speed' THEN value END) as wind_speed_mean_area,
-              MAX(CASE WHEN parameter_id = 'wind_max' THEN value END) as wind_speed_max_area,
-              AVG(CASE WHEN parameter_id = 'humidity' THEN value END) as humidity_mean_area,
-              AVG(CASE WHEN parameter_id = 'pressure' THEN value END) as pressure_at_sea_mean_area,
-              AVG(CASE WHEN parameter_id = 'cloud_cover' THEN value END) as cloud_cover_mean_area,
-              AVG(CASE WHEN parameter_id = 'visibility' THEN value END) as visibility_mean_area,
+              year, month,
+              day(to_timestamp(timeObserved)) as day,
+              hour(to_timestamp(timeObserved)) as hour,
+              AVG(CASE WHEN parameterId = 'temp_dry' THEN value END) as temp_mean_area,
+              MAX(CASE WHEN parameterId = 'temp_dry' THEN value END) as temp_max_area,
+              MIN(CASE WHEN parameterId = 'temp_dry' THEN value END) as temp_min_area,
+              AVG(CASE WHEN parameterId = 'wind_speed' THEN value END) as wind_speed_mean_area,
+              MAX(CASE WHEN parameterId = 'wind_max' THEN value END) as wind_speed_max_area,
+              AVG(CASE WHEN parameterId = 'humidity' THEN value END) as humidity_mean_area,
+              AVG(CASE WHEN parameterId = 'pressure' THEN value END) as pressure_at_sea_mean_area,
+              AVG(CASE WHEN parameterId = 'cloud_cover' THEN value END) as cloud_cover_mean_area,
+              AVG(CASE WHEN parameterId = 'visibility' THEN value END) as visibility_mean_area,
               -- Placeholders for fields not in raw data but expected by ML script
               CAST(NULL AS DOUBLE) as temp_grass_mean_area,
               CAST(NULL AS DOUBLE) as temp_soil_mean_area,
@@ -112,32 +125,29 @@ spec:
               CAST(NULL AS DOUBLE) as sun_last10min_glob_area,
               CAST(NULL AS DOUBLE) as precip_past1h_mean_area,
               CAST(NULL AS DOUBLE) as precip_past10min_mean_area,
-              COUNT(DISTINCT station_id) as n_stations
+              COUNT(DISTINCT stationId) as n_stations
             FROM weather_raw_historical
             GROUP BY
               CASE
-                WHEN station_id IN ('06186', '06180', '06190', '06135', '06138', '06141', '06151', '06156', '06159', '06168', '06169', '06170', '06181', '06183', '06187', '06188', '06193') THEN 'DK2'
+                WHEN stationId IN ('06186', '06180', '06190', '06135', '06138', '06141', '06151', '06156', '06159', '06168', '06169', '06170', '06181', '06183', '06187', '06188', '06193') THEN 'DK2'
                 ELSE 'DK1'
               END,
-              year, month, day, hour;
+              year, month, day(to_timestamp(timeObserved)), hour(to_timestamp(timeObserved));
 
             -- View for Energy Aggregation (consumption_area_hourly)
             -- Aggregates raw municipality data to DK area level
-            CREATE VIEW IF NOT EXISTS consumption_area_hourly AS
+            -- Note: PriceArea is already DK1/DK2. We sum ShareMWh.
+            CREATE VIEW consumption_area_hourly AS
             SELECT
-              CASE
-                WHEN CAST(MunicipalityNo AS INT) < 400 THEN 'DK1'
-                ELSE 'DK2'
-              END as dk_area,
-              year, month, day, hour,
-              SUM(ConsumptionMWh) as consumption_mwh_area
+              PriceArea as dk_area,
+              year, month,
+              day(to_timestamp(HourDK)) as day,
+              hour(to_timestamp(HourDK)) as hour,
+              SUM(ShareMWh) as consumption_mwh_area
             FROM energy_raw_historical
             GROUP BY
-              CASE
-                WHEN CAST(MunicipalityNo AS INT) < 400 THEN 'DK1'
-                ELSE 'DK2'
-              END,
-              year, month, day, hour;
+              PriceArea,
+              year, month, day(to_timestamp(HourDK)), hour(to_timestamp(HourDK));
 
             -- Create table for tracking predictions (used by prediction service)
             CREATE TABLE IF NOT EXISTS predicted_buckets (

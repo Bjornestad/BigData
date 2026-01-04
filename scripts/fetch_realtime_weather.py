@@ -23,8 +23,9 @@ from confluent_kafka.schema_registry.avro import AvroSerializer
 DMI_API_URL = "https://dmigw.govcloud.dk/v2/metObs/collections/observation/items"
 DMI_API_KEY = os.getenv("DMI_API_KEY", "b5800a05-4f0f-4584-b130-6129213728c0")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
-SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://kafka-schema-registry:8081")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_raw")
+# Updated to match Kubernetes service name
+SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_raw_avro") # Updated topic name to match sink
 FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "300"))  # 5 minutes default
 
 # All weather stations - will get from Hive station_metadata
@@ -58,9 +59,9 @@ AVRO_SCHEMA = """{
     "name": "WeatherObservation",
     "namespace": "dk.weather",
     "fields": [
-        {"name": "station_id", "type": ["null", "string"], "default": null},
-        {"name": "observed", "type": ["null", "string"], "default": null},
-        {"name": "parameter_id", "type": ["null", "string"], "default": null},
+        {"name": "stationId", "type": ["null", "string"], "default": null},
+        {"name": "timeObserved", "type": ["null", "string"], "default": null},
+        {"name": "parameterId", "type": ["null", "string"], "default": null},
         {"name": "value", "type": ["null", "double"], "default": null}
     ]
 }"""
@@ -115,9 +116,9 @@ def process_raw_observations(features, station_id):
                 value = None
 
         record = {
-        'station_id': station_id,
-        'observed': timestamp_str,
-        'parameter_id': props.get('parameterId'),
+        'stationId': station_id,
+        'timeObserved': timestamp_str,
+        'parameterId': props.get('parameterId'),
         'value': value
         }
         records.append(record)
@@ -168,7 +169,7 @@ def send_to_kafka(records):
     try:
         sent_count = 0
         for record in records:
-            key = f"{record['station_id']}_{record['observed']}"
+            key = f"{record['stationId']}_{record['timeObserved']}"
 
             # Serialize the record to Avro
             serialized_value = avro_serializer(
