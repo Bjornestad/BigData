@@ -18,9 +18,9 @@ from confluent_kafka.schema_registry.avro import AvroSerializer
 # Configuration
 ENERGINET_API_URL = "https://api.energidataservice.dk/dataset"
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
-SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://kafka-schema-registry:8081")
+SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")
 KAFKA_TOPIC = os.getenv("ENERGY_KAFKA_TOPIC", "energy_actual")  # Use separate env var
-FETCH_INTERVAL = int(os.getenv("ENERGY_FETCH_INTERVAL", "6000"))  # 60 minutes default
+FETCH_INTERVAL = int(os.getenv("ENERGY_FETCH_INTERVAL", "3600"))  # 60 minutes default
 
 # Avro Schema for raw energy consumption data (from ConsumptionCoverageLocationBased API)
 AVRO_SCHEMA = """{
@@ -43,7 +43,7 @@ AVRO_SCHEMA = """{
 producer = None
 avro_serializer = None
 
-def fetch_consumption_actual(hours_back=24):
+def fetch_consumption_actual(hours_back):
     """Fetch actual consumption data from Energinet (real-time, no delay)"""
     end_time = datetime.now()
     start_time = end_time - timedelta(hours=hours_back)
@@ -176,7 +176,7 @@ def main():
     print(f"   Kafka Topic: {KAFKA_TOPIC}")
     print(f"   Fetch Interval: {FETCH_INTERVAL}s ({FETCH_INTERVAL/3600:.1f}h)")
     print(f"   API: New Energinet API (real-time data)")
-    print(f"{'='*70}\n")
+    print(f"{ '='*70}\n")
 
     iteration = 0
     while True:
@@ -185,7 +185,7 @@ def main():
 
         # Fetch consumption data (real-time, no delay)
         print("  Fetching consumption data from Energinet (real-time)...")
-        raw_records = fetch_consumption_actual(hours_back=24)
+        raw_records = fetch_consumption_actual(1)
         print(f"  Fetched: {len(raw_records)} raw consumption records")
 
         # Process raw records to match Avro schema

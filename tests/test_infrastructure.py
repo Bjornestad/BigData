@@ -4,9 +4,10 @@ import requests
 import psycopg2
 from kafka import KafkaAdminClient
 from kafka.errors import NoBrokersAvailable
-import subprocess
 
-# Configuration (Defaults assume localhost port-forwarding)
+# Configuration
+# Local: Defaults assume localhost port-forwarding.
+# Helm/K8s: Set env vars to service DNS names (e.g. "kafka:9092") and run tests inside the cluster.
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://localhost:8081")
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -22,10 +23,7 @@ def test_kafka_connection_and_topics():
     required_topics = {
         "energy_actual", 
         "energy_predictions", 
-        "weather-data", 
-        "weather_raw_avro",
-        "weather_hourly_ml",
-        "weather-live-ingest"
+        "weather_raw_avro"
     }
     
     try:
@@ -57,7 +55,11 @@ def test_schema_registry_reachable():
         
         # Check for expected schemas
         # Note: Subject names usually follow topic-value convention
-        expected_subjects = ["weather-data-value", "energy_predictions-value"]
+        expected_subjects = [
+            "energy_predictions-value",
+            "energy_actual-value",
+            "weather_raw_avro-value"
+        ]
         for subject in expected_subjects:
             if subject not in subjects:
                 print(f"Warning: Schema subject '{subject}' not found.")

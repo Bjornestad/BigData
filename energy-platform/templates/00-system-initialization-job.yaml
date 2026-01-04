@@ -1,0 +1,79 @@
+# This job is intended to be run once to initialize the entire system.
+# It creates Hive tables, fetches historical data, trains the model, and starts the prediction service.
+# It requires a Docker image with Spark, Hadoop clients, and all project scripts and dependencies.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: system-initialization
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+        - name: wait-for-hive-metastore
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for Hive Metastore..."
+              until nc -z -v -w30 hive-metastore 9083; do
+                echo "Waiting for Hive Metastore (hive-metastore:9083)..."
+                sleep 5
+              done
+              echo "Hive Metastore is ready!"
+        - name: wait-for-namenode
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for NameNode..."
+              until nc -z -v -w30 namenode 9000; do
+                echo "Waiting for NameNode (namenode:9000)..."
+                sleep 5
+              done
+              echo "NameNode is ready!"
+        - name: wait-for-kafka
+          image: busybox:latest
+          command: [ "/bin/sh", "-c" ]
+          args:
+            - |
+              echo "Waiting for Kafka..."
+              until nc -z -v -w30 {{ .Release.Name }}-energy-cluster 9092; do
+                echo "Waiting for Kafka ({{ .Release.Name }}-energy-cluster:9092)..."
+                sleep 10
+              done
+              echo "Kafka is ready!"
+      containers:
+        - name: initializer
+          # NOTE: This job requires an image with Spark, Python dependencies, and all project scripts.
+          image: dummystad/bigdata:prediction-service-latest
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              echo "Starting system initialization..."
+              python3 /app/SparkML/initialize_system.py
+          env:
+            - name: HIVE_METASTORE_URI
+              value: "thrift://hive-metastore:9083"
+            - name: HDFS_WAREHOUSE
+              value: "hdfs://namenode:9000/user/hive/warehouse"
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "{{ .Release.Name }}-energy-cluster:9092"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://schema-registry:8081"
+            - name: DMI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dmi-api-key-secret
+                  key: DMI_API_KEY
+                  optional: true # Allows the job to run if the secret is not present
+            # Set a high value for historical days to populate the system
+            - name: FETCH_HISTORICAL_DAYS
+              value: "10"

@@ -15,8 +15,7 @@ import time
 
 # Configuration
 ENERGINET_API_BASE = "https://api.energidataservice.dk/dataset"
-# Use shared volume for persistence so Replay Job can use it
-DATA_DIR = "/data/historical_energy_batches"
+DATA_DIR = "/tmp/historical_energy_batches"
 HDFS_TARGET = "hdfs://namenode:9000/user/hive/warehouse/energy_actual"
 
 # Fetch settings
@@ -79,26 +78,18 @@ def process_batch_data(records):
 
     df = pd.DataFrame(records)
 
-    # Parse timestamp to get year/month for partitioning
-    # But keep the column itself as STRING to avoid Parquet/Spark timestamp compatibility issues
-    temp_ts = pd.to_datetime(df['HourDK'])
-    df['year'] = temp_ts.dt.year
-    df['month'] = temp_ts.dt.month
-    
-    # Ensure timestamp columns are strings (ISO format)
-    # This matches the Hive table definition (STRING) and avoids Parquet INT96/INT64 encoding issues
-    df['HourDK'] = df['HourDK'].astype(str)
-    if 'HourUTC' in df.columns:
-        df['HourUTC'] = df['HourUTC'].astype(str)
-    if 'Updated' in df.columns:
-        df['Updated'] = df['Updated'].astype(str)
+    # Parse timestamp
+    df['HourDK'] = pd.to_datetime(df['HourDK'])
+    df['year'] = df['HourDK'].dt.year
+    df['month'] = df['HourDK'].dt.month
+    df['day'] = df['HourDK'].dt.day
 
     # Keep all fields from ConsumptionCoverageLocationBased API
-    required_cols = ['HourUTC', 'HourDK', 'PriceArea', 'ConnectedArea', 'ViaArea', 'SharePPM', 'ShareMWh', 'Updated', 'year', 'month']
+    required_cols = ['HourUTC', 'HourDK', 'PriceArea', 'ConnectedArea', 'ViaArea', 'SharePPM', 'ShareMWh', 'Updated', 'year', 'month', 'day']
 
     # Ensure all columns exist
     for col in required_cols:
-        if col not in df.columns and col not in ['year', 'month']:
+        if col not in df.columns and col not in ['year', 'month', 'day']:
             df[col] = None
 
     return df[required_cols]
@@ -124,7 +115,6 @@ def main():
 
     # Create local directory
     os.makedirs(DATA_DIR, exist_ok=True)
-    print(f"DEBUG: Created directory {DATA_DIR}")
 
     batch_num = 0
     total_records = 0
@@ -153,36 +143,24 @@ def main():
             print(f"  ⚠ No records after processing, stopping")
             break
 
-        # Get date range in this batch (using the temp year/month columns or re-parsing for display)
-        # Since we converted to string, we can just take min/max of string for rough range
-        print(f"  Date range: {df['HourDK'].min()} to {df['HourDK'].max()}")
+        # Get date range in this batch
+        oldest_date = pd.to_datetime(df['HourDK']).min()
+        newest_date = pd.to_datetime(df['HourDK']).max()
+        print(f"  Date range: {oldest_date} to {newest_date}")
 
-        # Copy to HDFS directly (partitioned by year/month from the data)
-        for (year, month), group in df.groupby(['year', 'month']):
-            partition_file = os.path.join(DATA_DIR, f"energy_year={year}_month={month}_batch={batch_num}.parquet")
-            
-            print(f"DEBUG: Saving to {partition_file}...")
-            print(f"DEBUG: Column types: {group.dtypes}") # Added debug print
-            
-            # Use version='1.0' AND disable dictionary encoding for maximum compatibility
-            # AND we are now writing Strings for timestamps, which is very safe
-            group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False, version='1.0', use_dictionary=False)
-            
-            if os.path.exists(partition_file):
-                size = os.path.getsize(partition_file)
-                print(f"DEBUG: File saved. Size: {size} bytes")
-            else:
-                print(f"DEBUG: ERROR - File not found after saving!")
+        # Copy to HDFS directly (partitioned by year/month/day from the data)
+        for (year, month, day), group in df.groupby(['year', 'month', 'day']):
+            partition_file = os.path.join(DATA_DIR, f"temp_year={year}_month={month}_day={day}_batch={batch_num}.parquet")
+            group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False)
 
-            hdfs_file = f"{HDFS_TARGET}/year={year}/month={month}/batch_{batch_num:04d}.parquet"
+            hdfs_file = f"{HDFS_TARGET}/year={year}/month={month}/day={day}/batch_{batch_num:04d}.parquet"
             if copy_to_hdfs(partition_file, hdfs_file):
-                print(f"  ✓ HDFS: year={year}/month={month} ({len(group):,} records)")
+                print(f"  ✓ HDFS: year={year}/month={month}/day={day} ({len(group):,} records)")
             else:
-                print(f"  ⚠ Failed to copy year={year}/month={month} to HDFS")
+                print(f"  ⚠ Failed to copy year={year}/month={month}/day={day} to HDFS")
 
-            # Keep file for Replay Job (do not remove)
-            print(f"DEBUG: SKIPPING DELETION of {partition_file}")
-            # os.remove(partition_file)
+            # Clean up temp file immediately
+            os.remove(partition_file)
 
         total_records += len(df)
 

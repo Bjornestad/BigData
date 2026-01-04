@@ -1,194 +1,198 @@
+#!/usr/bin/env python3
+"""
+Replay Historical Data to Kafka
+Reads historical weather and energy data from Parquet files and sends them to Kafka topics using Avro serialization.
+This script is intended to be run as a Kubernetes Job to seed the system with data.
+"""
+
 import os
 import time
 import json
 import pandas as pd
 import numpy as np
-from kafka import KafkaProducer
+from confluent_kafka import Producer
+from confluent_kafka.serialization import SerializationContext, MessageField
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroSerializer
 from datetime import datetime
 
-# Configuration
-KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-DATA_DIR = os.getenv("DATA_DIR", "/data")
-WEATHER_TOPIC = "weather-data"
+# --- Configuration ---
+KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
+SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")
+DATA_DIR = os.getenv("DATA_DIR", "/data/historical") # Changed to a more specific default
+
+# Topics
+WEATHER_TOPIC = "weather_raw_avro"
 ENERGY_TOPIC = "energy_actual"
 
-# Wait settings
-MAX_WAIT_MINUTES = 20
-CHECK_INTERVAL_SECONDS = 30
+# --- Avro Schemas ---
+# Must match the schemas used by the consumers (Spark jobs and fetchers)
+WEATHER_AVRO_SCHEMA = """{
+    "type": "record",
+    "name": "WeatherObservation",
+    "namespace": "dk.weather",
+    "fields": [
+        {"name": "stationId", "type": ["null", "string"], "default": null},
+        {"name": "timeObserved", "type": ["null", "string"], "default": null},
+        {"name": "parameterId", "type": ["null", "string"], "default": null},
+        {"name": "value", "type": ["null", "double"], "default": null}
+    ]
+}"""
 
-def wait_for_data():
-    """Wait until data files appear in the data directory."""
-    print(f"Waiting for data in {DATA_DIR}...")
-    start_time = time.time()
+ENERGY_AVRO_SCHEMA = """{
+    "type": "record",
+    "name": "EnergyConsumptionRaw",
+    "namespace": "dk.energy",
+    "fields": [
+        {"name": "HourUTC", "type": "string"},
+        {"name": "HourDK", "type": "string"},
+        {"name": "PriceArea", "type": "string"},
+        {"name": "ConnectedArea", "type": "string"},
+        {"name": "ViaArea", "type": "string"},
+        {"name": "SharePPM", "type": ["null", "long"], "default": null},
+        {"name": "ShareMWh", "type": ["null", "double"], "default": null},
+        {"name": "Updated", "type": "string"}
+    ]
+}"""
 
-    while True:
-        # Check for files
-        if os.path.exists(DATA_DIR):
-            files = os.listdir(DATA_DIR)
-            weather_files = [f for f in files if f.startswith("dmi_weather_") and f.endswith(".parquet")]
-            energy_files = [f for f in files if f.startswith("energy_data_") and f.endswith(".parquet")]
 
-            if weather_files or energy_files:
-                print(f"Found {len(weather_files)} weather files and {len(energy_files)} energy files.")
-                total_files = len(weather_files) + len(energy_files)
-                if total_files >= 5:
-                    print("Sufficient data found. Starting replay.")
-                    return True
-                else:
-                    print(f"Found {total_files} files. Waiting for more...")
-
-        elapsed = (time.time() - start_time) / 60
-        if elapsed > MAX_WAIT_MINUTES:
-            print(f"Timeout reached ({MAX_WAIT_MINUTES} min). Starting with whatever data we have.")
-            return False
-
-        time.sleep(CHECK_INTERVAL_SECONDS)
-
-def create_producer():
-    """Create a Kafka producer instance."""
+def create_avro_producer_and_serializers():
+    """Create a Kafka producer and Avro serializers for weather and energy."""
     try:
-        producer = KafkaProducer(
-            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
-            retries=5
+        producer_conf = {'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS}
+        producer = Producer(producer_conf)
+
+        schema_registry_conf = {'url': SCHEMA_REGISTRY_URL}
+        schema_registry_client = SchemaRegistryClient(schema_registry_conf)
+
+        weather_serializer = AvroSerializer(
+            schema_registry_client,
+            WEATHER_AVRO_SCHEMA,
+            lambda obj, ctx: obj  # Simple dict-to-object
         )
-        print(f"Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
-        return producer
+        energy_serializer = AvroSerializer(
+            schema_registry_client,
+            ENERGY_AVRO_SCHEMA,
+            lambda obj, ctx: obj  # Simple dict-to-object
+        )
+
+        print(f"✓ Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+        print(f"✓ Connected to Schema Registry at {SCHEMA_REGISTRY_URL}")
+        return producer, weather_serializer, energy_serializer
     except Exception as e:
-        print(f"Failed to connect to Kafka: {e}")
-        return None
+        print(f"✗ Failed to initialize Kafka/Schema Registry: {e}")
+        return None, None, None
+
+def delivery_report(err, msg):
+    """Kafka delivery callback."""
+    if err is not None:
+        print(f"  ✗ Message delivery failed for topic {msg.topic()}: {err}")
 
 def clean_record(record):
-    """Replace NaN/Infinity with None for JSON compliance."""
+    """Replace NaN/Infinity with None for Avro/JSON compliance."""
     cleaned = {}
     for k, v in record.items():
         if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
             cleaned[k] = None
+        # Convert Timestamps to ISO 8601 strings
+        elif isinstance(v, pd.Timestamp) or isinstance(v, datetime):
+            cleaned[k] = v.isoformat()
         else:
             cleaned[k] = v
     return cleaned
 
-def replay_weather_data(producer):
-    """Replay weather data from Parquet files to Kafka."""
-    print("Replaying weather data...")
+def replay_data(producer, serializer, topic, file_prefix, required_columns):
+    """Generic function to replay data from Parquet files to a Kafka topic."""
+    print(f"\nReplaying data for topic '{topic}'...")
 
-    files = [f for f in os.listdir(DATA_DIR) if f.startswith("dmi_weather_") and f.endswith(".parquet")]
-    files.sort()
-
-    if not files:
-        print("No weather data files found.")
+    try:
+        files = [f for f in os.listdir(DATA_DIR) if f.startswith(file_prefix) and f.endswith(".parquet")]
+        files.sort()
+    except FileNotFoundError:
+        print(f"  ✗ Data directory not found: {DATA_DIR}")
         return
 
+    if not files:
+        print(f"  - No '{file_prefix}*.parquet' files found in {DATA_DIR}.")
+        return
+
+    total_sent = 0
     for file in files:
         filepath = os.path.join(DATA_DIR, file)
-        print(f"Processing {file}...")
+        print(f"  Processing {file}...")
 
         try:
             df = pd.read_parquet(filepath)
-            records = df.to_dict(orient='records')
+            
+            # Ensure required columns exist
+            for col in required_columns:
+                if col not in df.columns:
+                    df[col] = None # Add missing columns with null values
 
-            # DEBUG: Print first record keys
-            if records:
-                print(f"DEBUG: Weather record keys: {list(records[0].keys())}")
+            records = df.to_dict(orient='records')
+            sent_from_file = 0
 
             for record in records:
-                record = clean_record(record)
-                if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
-                    record['timestamp'] = record['timestamp'].isoformat()
-                if 'date' in record:
-                    record['date'] = str(record['date'])
+                # Prepare record: clean NaNs and ensure correct types
+                cleaned = clean_record(record)
+                
+                # Use a composite key for partitioning, e.g., time + area/station
+                key_fields = [str(cleaned[k]) for k in [required_columns[0], required_columns[1]] if k in cleaned and cleaned[k] is not None]
+                key = "_".join(key_fields)
 
-                producer.send(WEATHER_TOPIC, record)
+                serialized_value = serializer(
+                    cleaned,
+                    SerializationContext(topic, MessageField.VALUE)
+                )
 
-            producer.flush()
-            print(f"Sent {len(records)} weather records from {file}")
+                producer.produce(
+                    topic=topic,
+                    key=key.encode('utf-8'),
+                    value=serialized_value,
+                    on_delivery=delivery_report
+                )
+                sent_from_file += 1
 
-        except Exception as e:
-            print(f"Error processing {file}: {e}")
+            # Poll for delivery reports
+            producer.poll(0)
 
-def replay_energy_data(producer):
-    """Replay energy data from Parquet files to Kafka."""
-    print("Replaying energy data...")
-
-    files = [f for f in os.listdir(DATA_DIR) if f.startswith("energy_data_") and f.endswith(".parquet")]
-    files.sort()
-
-    if not files:
-        print("No energy data files found.")
-        return
-
-    for file in files:
-        filepath = os.path.join(DATA_DIR, file)
-        print(f"Processing {file}...")
-
-        try:
-            df = pd.read_parquet(filepath)
-            records = df.to_dict(orient='records')
-
-            # DEBUG: Print first record keys
-            if records:
-                print(f"DEBUG: Energy record keys: {list(records[0].keys())}")
-
-            for record in records:
-                record = clean_record(record)
-
-                # 1. Map Area: Use MunicipalityNo if dk_area is missing
-                if 'dk_area' not in record:
-                    if 'PriceArea' in record:
-                        record['dk_area'] = record['PriceArea']
-                    elif 'MunicipalityNo' in record:
-                        # Map municipality to DK1/DK2
-                        # Simple heuristic: < 400 is DK1, >= 400 is DK2
-                        try:
-                            muni = int(record['MunicipalityNo'])
-                            record['dk_area'] = 'DK1' if muni < 400 else 'DK2'
-                        except:
-                            record['dk_area'] = 'Unknown'
-
-                # 2. Calculate Total Production (Transformation)
-                if 'total_production_mwh' not in record:
-                    prod = 0.0
-                    # Sum known production columns
-                    for col in ['SolarMWh', 'OnshoreWindMWh', 'OffshoreWindLt100MW_MWh', 'OffshoreWindGe100MW_MWh', 'ThermalPowerMWh']:
-                        if col in record and record[col] is not None:
-                            prod += float(record[col])
-                    record['total_production_mwh'] = prod
-
-                # 3. Map Consumption
-                if 'total_consumption_mwh' not in record:
-                    if 'GrossConsumptionMWh' in record:
-                        record['total_consumption_mwh'] = record['GrossConsumptionMWh']
-                    elif 'ConsumptionMWh' in record:
-                        record['total_consumption_mwh'] = record['ConsumptionMWh']
-                    elif 'Consumption' in record:
-                        record['total_consumption_mwh'] = record['Consumption']
-                    else:
-                        record['total_consumption_mwh'] = 0.0
-
-                if 'timestamp' in record and isinstance(record['timestamp'], pd.Timestamp):
-                    record['timestamp'] = record['timestamp'].isoformat()
-                if 'date' in record:
-                    record['date'] = str(record['date'])
-
-                producer.send(ENERGY_TOPIC, record)
-
-            producer.flush()
-            print(f"Sent {len(records)} energy records from {file}")
+            total_sent += sent_from_file
+            print(f"  ✓ Queued {sent_from_file} records from {file}")
 
         except Exception as e:
-            print(f"Error processing {file}: {e}")
+            print(f"  ✗ Error processing {file}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    print(f"  Flushing producer for topic '{topic}'...")
+    producer.flush()
+    print(f"✅ Finished replaying for topic '{topic}'. Total records sent: {total_sent}")
+
 
 def main():
-    print("Starting replay job...")
-    wait_for_data()
-    time.sleep(10)
-    producer = create_producer()
+    print("--- Starting Kafka Replay Job ---")
+    
+    producer, weather_serializer, energy_serializer = create_avro_producer_and_serializers()
     if not producer:
         return
-    replay_weather_data(producer)
-    replay_energy_data(producer)
+
+    # Replay Weather Data
+    # These are the fields defined in the Avro schema
+    weather_cols = ["stationId", "timeObserved", "parameterId", "value"]
+    # The historical files might have different names, we assume the replay job's volume
+    # contains files named appropriately or this script is adapted.
+    # For now, let's assume the historical fetcher saves with a consistent prefix.
+    replay_data(producer, weather_serializer, WEATHER_TOPIC, "historical_weather", weather_cols)
+
+    # Replay Energy Data
+    # These are the fields defined in the Avro schema
+    energy_cols = ["HourUTC", "HourDK", "PriceArea", "ConnectedArea", "ViaArea", "SharePPM", "ShareMWh", "Updated"]
+    replay_data(producer, energy_serializer, ENERGY_TOPIC, "historical_energy", energy_cols)
+
     producer.close()
-    print("Replay job completed.")
+    print("\n--- Replay Job Completed ---")
 
 if __name__ == "__main__":
+    # Add a small delay to allow services to start, if needed
+    time.sleep(int(os.getenv("REPLAY_DELAY_SECONDS", "0")))
     main()

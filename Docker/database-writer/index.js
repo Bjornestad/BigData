@@ -5,9 +5,8 @@ const { Pool } = require('pg');
 // Configuration from environment variables
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
 const SCHEMA_REGISTRY_URL = process.env.SCHEMA_REGISTRY_URL || 'http://schema-registry:8081';
-const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'power-consumption-actual';
-const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'power-consumption-predicted';
-const WEATHER_TOPIC = process.env.WEATHER_TOPIC || 'weather-data';
+const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'energy_actual';
+const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'energy_predictions';
 const CONSUMER_GROUP = process.env.CONSUMER_GROUP || 'database-writer';
 const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/power_grid';
 const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || '1000');
@@ -17,7 +16,7 @@ console.log('Starting Database Writer Service');
 console.log('Configuration:');
 console.log('- Kafka Brokers:', KAFKA_BROKERS);
 console.log('- Schema Registry:', SCHEMA_REGISTRY_URL);
-console.log('- Topics:', [ACTUAL_TOPIC, PREDICTED_TOPIC, WEATHER_TOPIC]);
+console.log('- Topics:', [ACTUAL_TOPIC, PREDICTED_TOPIC]);
 console.log('- Consumer Group:', CONSUMER_GROUP);
 console.log('- Batch Size:', BATCH_SIZE);
 console.log('- Flush Interval:', FLUSH_INTERVAL, 'ms');
@@ -164,10 +163,10 @@ async function setupKafka() {
     console.log('✓ Connected to Kafka');
 
     await consumer.subscribe({ 
-      topics: [ACTUAL_TOPIC, PREDICTED_TOPIC, WEATHER_TOPIC],
+      topics: [ACTUAL_TOPIC, PREDICTED_TOPIC],
       fromBeginning: false 
     });
-    console.log(`✓ Subscribed to topics: ${ACTUAL_TOPIC}, ${PREDICTED_TOPIC}, ${WEATHER_TOPIC}`);
+    console.log(`✓ Subscribed to topics: ${ACTUAL_TOPIC}, ${PREDICTED_TOPIC}`);
 
     await consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
@@ -196,8 +195,6 @@ async function setupKafka() {
             type = 'actual';
           } else if (topic === PREDICTED_TOPIC) {
             type = 'predicted';
-          } else if (topic === WEATHER_TOPIC) {
-            type = 'weather';
           }
 
           // Extract value based on message structure

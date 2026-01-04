@@ -6,64 +6,13 @@ data:
   weather_station.avsc: |
     {
       "type": "record",
-      "name": "WeatherStationData",
-      "namespace": "com.energyproject",
+      "name": "WeatherObservation",
+      "namespace": "dk.weather",
       "fields": [
-        { "name": "station_id", "type": "string", "doc": "String to preserve leading zeros (e.g. 06019)" },
-        { "name": "station_name", "type": "string" },
-        { "name": "timestamp", "type": "string", "doc": "ISO8601 with timezone" },
-        { "name": "date", "type": "string" },
-        { "name": "year", "type": "int" },
-        { "name": "month", "type": "int" },
-        { "name": "day", "type": "int" },
-        { "name": "hour", "type": "int" },
-        { "name": "minute", "type": "int" },
-        { "name": "latitude", "type": "double" },
-        { "name": "longitude", "type": "double" },
-        { "name": "cloud_cover", "type": ["null", "double"], "default": null },
-        { "name": "cloud_height", "type": ["null", "double"], "default": null },
-        { "name": "humidity", "type": ["null", "double"], "default": null },
-        { "name": "humidity_past1h", "type": ["null", "double"], "default": null },
-        { "name": "leav_hum_dur_past10min", "type": ["null", "double"], "default": null },
-        { "name": "leav_hum_dur_past1h", "type": ["null", "double"], "default": null },
-        { "name": "precip_dur_past10min", "type": ["null", "double"], "default": null },
-        { "name": "precip_dur_past1h", "type": ["null", "double"], "default": null },
-        { "name": "precip_past10min", "type": ["null", "double"], "default": null },
-        { "name": "precip_past1h", "type": ["null", "double"], "default": null },
-        { "name": "precip_past1min", "type": ["null", "double"], "default": null },
-        { "name": "pressure", "type": ["null", "double"], "default": null },
-        { "name": "pressure_at_sea", "type": ["null", "double"], "default": null },
-        { "name": "radia_glob", "type": ["null", "double"], "default": null },
-        { "name": "radia_glob_past1h", "type": ["null", "double"], "default": null },
-        { "name": "sun_last10min_glob", "type": ["null", "double"], "default": null },
-        { "name": "sun_last1h_glob", "type": ["null", "double"], "default": null },
-        { "name": "temp_dew", "type": ["null", "double"], "default": null },
-        { "name": "temp_dry", "type": ["null", "double"], "default": null },
-        { "name": "temp_grass", "type": ["null", "double"], "default": null },
-        { "name": "temp_grass_max_past1h", "type": ["null", "double"], "default": null },
-        { "name": "temp_grass_mean_past1h", "type": ["null", "double"], "default": null },
-        { "name": "temp_grass_min_past1h", "type": ["null", "double"], "default": null },
-        { "name": "temp_max_past12h", "type": ["null", "double"], "default": null },
-        { "name": "temp_max_past1h", "type": ["null", "double"], "default": null },
-        { "name": "temp_mean_past1h", "type": ["null", "double"], "default": null },
-        { "name": "temp_min_past12h", "type": ["null", "double"], "default": null },
-        { "name": "temp_min_past1h", "type": ["null", "double"], "default": null },
-        { "name": "temp_soil", "type": ["null", "double"], "default": null },
-        { "name": "temp_soil_max_past1h", "type": ["null", "double"], "default": null },
-        { "name": "temp_soil_mean_past1h", "type": ["null", "double"], "default": null },
-        { "name": "temp_soil_min_past1h", "type": ["null", "double"], "default": null },
-        { "name": "visib_mean_last10min", "type": ["null", "double"], "default": null },
-        { "name": "visibility", "type": ["null", "double"], "default": null },
-          { "name": "weather", "type": ["null", "string"], "default": null },
-        { "name": "wind_dir", "type": ["null", "double"], "default": null },
-        { "name": "wind_dir_past1h", "type": ["null", "double"], "default": null },
-        { "name": "wind_gust_always_past1h", "type": ["null", "double"], "default": null },
-        { "name": "wind_max", "type": ["null", "double"], "default": null },
-        { "name": "wind_max_per10min_past1h", "type": ["null", "double"], "default": null },
-        { "name": "wind_min", "type": ["null", "double"], "default": null },
-        { "name": "wind_min_past1h", "type": ["null", "double"], "default": null },
-        { "name": "wind_speed", "type": ["null", "double"], "default": null },
-        { "name": "wind_speed_past1h", "type": ["null", "double"], "default": null }
+        { "name": "stationId", "type": ["null", "string"], "default": null },
+        { "name": "timeObserved", "type": ["null", "string"], "default": null },
+        { "name": "parameterId", "type": ["null", "string"], "default": null },
+        { "name": "value", "type": ["null", "double"], "default": null }
       ]
     }
   energy_prediction.avsc: |
@@ -77,6 +26,22 @@ data:
         { "name": "predicted_production_mwh", "type": "double" },
         { "name": "model_version", "type": "string", "default": "v1.0" },
         { "name": "confidence_score", "type": ["null", "double"], "default": null }
+      ]
+    }
+  energy_consumption.avsc: |
+    {
+      "type": "record",
+      "name": "EnergyConsumptionRaw",
+      "namespace": "dk.energy",
+      "fields": [
+        {"name": "HourUTC", "type": "string"},
+        {"name": "HourDK", "type": "string"},
+        {"name": "PriceArea", "type": "string"},
+        {"name": "ConnectedArea", "type": "string"},
+        {"name": "ViaArea", "type": "string"},
+        {"name": "SharePPM", "type": ["null", "long"], "default": null},
+        {"name": "ShareMWh", "type": ["null", "double"], "default": null},
+        {"name": "Updated", "type": "string"}
       ]
     }
 ---
@@ -101,13 +66,19 @@ spec:
               SCHEMA_JSON=$(cat /config/weather_station.avsc | sed 's/"/\\"/g' | tr -d '\n' | tr -d ' ')
               curl -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
                    --data "{\"schema\": \"$SCHEMA_JSON\"}" \
-                   http://schema-registry:8081/subjects/weather-data-value/versions
+                   http://schema-registry:8081/subjects/weather_raw_avro-value/versions
               
               echo "\n2. Registering Energy Prediction Output Schema..."
               SCHEMA_JSON_PRED=$(cat /config/energy_prediction.avsc | sed 's/"/\\"/g' | tr -d '\n' | tr -d ' ')
               curl -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
                    --data "{\"schema\": \"$SCHEMA_JSON_PRED\"}" \
                    http://schema-registry:8081/subjects/energy_predictions-value/versions
+
+              echo "\n3. Registering Energy Actual Schema..."
+              SCHEMA_JSON_ACTUAL=$(cat /config/energy_consumption.avsc | sed 's/"/\\"/g' | tr -d '\n' | tr -d ' ')
+              curl -X POST -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+                   --data "{\"schema\": \"$SCHEMA_JSON_ACTUAL\"}" \
+                   http://schema-registry:8081/subjects/energy_actual-value/versions
               
               echo "\nDone."
           volumeMounts:

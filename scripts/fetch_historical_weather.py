@@ -22,8 +22,7 @@ load_dotenv()
 # Configuration
 DMI_API_URL = "https://dmigw.govcloud.dk/v2/metObs/collections/observation/items"
 DMI_API_KEY = os.getenv("DMI_API_KEY", "b5800a05-4f0f-4584-b130-6129213728c0")
-# Use shared volume for persistence so Replay Job can use it
-DATA_DIR = "/data/historical_weather_monthly"
+DATA_DIR = "/tmp/historical_weather_monthly"
 HDFS_TARGET = "hdfs://namenode:9000/user/hive/warehouse/weather_observations_historical"
 
 # DK1 stations (West Denmark)
@@ -118,7 +117,8 @@ def process_all_station_data(all_features):
             'timeObserved': timestamp_str,
             'value': float(value) if value is not None else None,
             'year': ts.year,
-            'month': ts.month
+            'month': ts.month,
+            'day': ts.day
         })
 
     if not records:
@@ -213,24 +213,20 @@ def main():
         # Get the oldest timestamp in this batch
         oldest_ts = pd.to_datetime(df["timeObserved"], utc=True).min()
         print(f"  Oldest record: {oldest_ts}")
-        
-        # Ensure timeObserved is string to avoid Parquet timestamp issues
-        df['timeObserved'] = df['timeObserved'].astype(str)
 
-        # Copy to HDFS directly (partitioned by year/month from the data)
-        for (year, month), group in df.groupby(['year', 'month']):
-            partition_file = os.path.join(DATA_DIR, f"weather_year={year}_month={month}_batch={batch_num}.parquet")
-            # Use version='1.0' AND disable dictionary encoding for maximum compatibility
-            group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False, version='1.0', use_dictionary=False)
+        # Copy to HDFS directly (partitioned by year/month/day from the data)
+        for (year, month, day), group in df.groupby(['year', 'month', 'day']):
+            partition_file = os.path.join(DATA_DIR, f"temp_year={year}_month={month}_day={day}_batch={batch_num}.parquet")
+            group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False)
 
-            hdfs_file = f"{HDFS_TARGET}/year={year}/month={month}/batch_{batch_num:04d}.parquet"
+            hdfs_file = f"{HDFS_TARGET}/year={year}/month={month}/day={day}/batch_{batch_num:04d}.parquet"
             if copy_to_hdfs(partition_file, hdfs_file):
-                print(f"  ✓ HDFS: year={year}/month={month} ({len(group):,} records)")
+                print(f"  ✓ HDFS: year={year}/month={month}/day={day} ({len(group):,} records)")
             else:
-                print(f"  ⚠ Failed to copy year={year}/month={month} to HDFS")
+                print(f"  ⚠ Failed to copy year={year}/month={month}/day={day} to HDFS")
 
-            # Keep file for Replay Job (do not remove)
-            # os.remove(partition_file)
+            # Clean up temp file immediately
+            os.remove(partition_file)
 
         total_records += len(df)
 

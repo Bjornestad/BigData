@@ -83,12 +83,12 @@ spec:
             -- This table is usually created by Kafka Connect, but we pre-create it to ensure Spark can see it
             CREATE EXTERNAL TABLE weather_raw_avro (
               stationId STRING,
-              parameterId STRING,
               timeObserved STRING,
+              parameterId STRING,
               value DOUBLE
             )
             PARTITIONED BY (year INT, month INT, day INT)
-            STORED AS AVRO
+            STORED AS PARQUET
             LOCATION 'hdfs://namenode:9000/user/hive/warehouse/weather_raw_avro';
 
             -- 4. Aggregated Views (to match what ML script expects)

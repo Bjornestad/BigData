@@ -5,200 +5,201 @@ metadata:
   namespace: {{ .Release.Namespace }}
 data:
   replay_to_kafka.py: |
+    #!/usr/bin/env python3
+    """
+    Replay Historical Data to Kafka
+    Reads historical weather and energy data from Parquet files and sends them to Kafka topics using Avro serialization.
+    This script is intended to be run as a Kubernetes Job to seed the system with data.
+    """
+
     import os
     import time
     import json
-    import subprocess
     import pandas as pd
     import numpy as np
-    from kafka import KafkaProducer
-    from datetime import datetime, date
+    from confluent_kafka import Producer
+    from confluent_kafka.serialization import SerializationContext, MessageField
+    from confluent_kafka.schema_registry import SchemaRegistryClient
+    from confluent_kafka.schema_registry.avro import AvroSerializer
+    from datetime import datetime
 
-    # Configuration
-    KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    # --- Configuration ---
+    KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
+    SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")
+    DATA_DIR = os.getenv("DATA_DIR", "/data/historical") # Changed to a more specific default
+
+    # Topics
     WEATHER_TOPIC = "weather_raw_avro"
     ENERGY_TOPIC = "energy_actual"
 
-    # HDFS Paths
-    HDFS_ENERGY_PATH = "/user/hive/warehouse/energy_actual"
-    HDFS_WEATHER_PATH = "/user/hive/warehouse/weather_observations_historical"
+    # --- Avro Schemas ---
+    # Must match the schemas used by the consumers (Spark jobs and fetchers)
+    WEATHER_AVRO_SCHEMA = """{
+        "type": "record",
+        "name": "WeatherObservation",
+        "namespace": "dk.weather",
+        "fields": [
+            {"name": "stationId", "type": ["null", "string"], "default": null},
+            {"name": "timeObserved", "type": ["null", "string"], "default": null},
+            {"name": "parameterId", "type": ["null", "string"], "default": null},
+            {"name": "value", "type": ["null", "double"], "default": null}
+        ]
+    }"""
 
-    # Local temp dir
-    TEMP_DIR = "/tmp/replay_data"
+    ENERGY_AVRO_SCHEMA = """{
+        "type": "record",
+        "name": "EnergyConsumptionRaw",
+        "namespace": "dk.energy",
+        "fields": [
+            {"name": "HourUTC", "type": "string"},
+            {"name": "HourDK", "type": "string"},
+            {"name": "PriceArea", "type": "string"},
+            {"name": "ConnectedArea", "type": "string"},
+            {"name": "ViaArea", "type": "string"},
+            {"name": "SharePPM", "type": ["null", "long"], "default": null},
+            {"name": "ShareMWh", "type": ["null", "double"], "default": null},
+            {"name": "Updated", "type": "string"}
+        ]
+    }"""
 
-    # Wait settings
-    MAX_WAIT_MINUTES = 20
-    CHECK_INTERVAL_SECONDS = 30
 
-    class DateTimeEncoder(json.JSONEncoder):
-        def default(self, obj):
-            if isinstance(obj, (datetime, date, pd.Timestamp)):
-                return obj.isoformat()
-            if isinstance(obj, (np.int64, np.int32, np.int16)):
-                return int(obj)
-            if isinstance(obj, (np.float64, np.float32)):
-                return float(obj)
-            return super(DateTimeEncoder, self).default(obj)
-
-    def run_hdfs_cmd(cmd):
-        """Run HDFS command and return output"""
+    def create_avro_producer_and_serializers():
+        """Create a Kafka producer and Avro serializers for weather and energy."""
         try:
-            full_cmd = ['hdfs', 'dfs'] + cmd
-            result = subprocess.run(full_cmd, capture_output=True, text=True, check=True)
-            return result.stdout.strip()
-        except subprocess.CalledProcessError as e:
-            print(f"HDFS Error: {e.stderr}")
-            return None
+            producer_conf = {'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS}
+            producer = Producer(producer_conf)
 
-    def list_hdfs_files(hdfs_path):
-        """Recursively list parquet files in HDFS path"""
-        print(f"Listing files in {hdfs_path}...")
-        # -ls -R lists recursively
-        output = run_hdfs_cmd(['-ls', '-R', hdfs_path])
-        if not output:
-            return []
+            schema_registry_conf = {'url': SCHEMA_REGISTRY_URL}
+            schema_registry_client = SchemaRegistryClient(schema_registry_conf)
 
-        files = []
-        for line in output.split('\n'):
-            parts = line.split()
-            if len(parts) >= 8:
-                path = parts[-1]
-                if path.endswith('.parquet'):
-                    files.append(path)
-        return files
-
-    def wait_for_data():
-        """Wait until data files appear in HDFS."""
-        print(f"Checking HDFS for data...")
-        start_time = time.time()
-
-        while True:
-            energy_files = list_hdfs_files(HDFS_ENERGY_PATH)
-            weather_files = list_hdfs_files(HDFS_WEATHER_PATH)
-
-            if energy_files or weather_files:
-                print(f"Found {len(energy_files)} energy files and {len(weather_files)} weather files in HDFS.")
-                if len(energy_files) >= 1: # Weather might be slow, start if energy is there
-                    print("Sufficient data found. Starting bulk load.")
-                    return energy_files, weather_files
-                else:
-                    print(f"Waiting for energy data...")
-
-            elapsed = (time.time() - start_time) / 60
-            if elapsed > MAX_WAIT_MINUTES:
-                print(f"Timeout reached ({MAX_WAIT_MINUTES} min). Starting with whatever data we have.")
-                return energy_files, weather_files
-
-            time.sleep(CHECK_INTERVAL_SECONDS)
-
-    def create_producer():
-        """Create a Kafka producer instance."""
-        try:
-            producer = KafkaProducer(
-                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                value_serializer=lambda v: json.dumps(v, cls=DateTimeEncoder).encode('utf-8'),
-                retries=5,
-                batch_size=131072,
-                linger_ms=20,
-                compression_type='gzip'
+            weather_serializer = AvroSerializer(
+                schema_registry_client,
+                WEATHER_AVRO_SCHEMA,
+                lambda obj, ctx: obj  # Simple dict-to-object
             )
-            print(f"Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
-            return producer
+            energy_serializer = AvroSerializer(
+                schema_registry_client,
+                ENERGY_AVRO_SCHEMA,
+                lambda obj, ctx: obj  # Simple dict-to-object
+            )
+
+            print(f"✓ Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+            print(f"✓ Connected to Schema Registry at {SCHEMA_REGISTRY_URL}")
+            return producer, weather_serializer, energy_serializer
         except Exception as e:
-            print(f"Failed to connect to Kafka: {e}")
-            return None
+            print(f"✗ Failed to initialize Kafka/Schema Registry: {e}")
+            return None, None, None
+
+    def delivery_report(err, msg):
+        """Kafka delivery callback."""
+        if err is not None:
+            print(f"  ✗ Message delivery failed for topic {msg.topic()}: {err}")
 
     def clean_record(record):
-        """Replace NaN/Infinity with None for JSON compliance."""
+        """Replace NaN/Infinity with None for Avro/JSON compliance."""
         cleaned = {}
         for k, v in record.items():
             if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
                 cleaned[k] = None
+            # Convert Timestamps to ISO 8601 strings
+            elif isinstance(v, pd.Timestamp) or isinstance(v, datetime):
+                cleaned[k] = v.isoformat()
             else:
                 cleaned[k] = v
         return cleaned
 
-    def process_energy_record(record):
-        record = clean_record(record)
-        # Ensure timestamp is present for Database Writer
-        if 'HourDK' in record:
-             record['timestamp'] = record['HourDK'] # Encoder will handle conversion
-        return record
-
-    def process_weather_record(record):
-        record = clean_record(record)
-        if 'timeObserved' in record:
-             record['timestamp'] = record['timeObserved']
-        return record
-
-    def process_file(producer, hdfs_path, topic, process_func):
-        """Download file from HDFS, process, and delete"""
-        filename = os.path.basename(hdfs_path)
-        local_path = os.path.join(TEMP_DIR, filename)
-
-        print(f"Downloading {hdfs_path} -> {local_path}")
-        if run_hdfs_cmd(['-get', '-f', hdfs_path, local_path]) is None:
-            print(f"Failed to download {hdfs_path}")
-            return
+    def replay_data(producer, serializer, topic, file_prefix, required_columns):
+        """Generic function to replay data from Parquet files to a Kafka topic."""
+        print(f"\nReplaying data for topic '{topic}'...")
 
         try:
-            df = pd.read_parquet(local_path)
-            records = df.to_dict(orient='records')
-            print(f"  -> Sending {len(records)} records to {topic}...")
+            files = [f for f in os.listdir(DATA_DIR) if f.startswith(file_prefix) and f.endswith(".parquet")]
+            files.sort()
+        except FileNotFoundError:
+            print(f"  ✗ Data directory not found: {DATA_DIR}")
+            return
 
-            for record in records:
-                payload = process_func(record)
-                producer.send(topic, payload)
+        if not files:
+            print(f"  - No '{file_prefix}*.parquet' files found in {DATA_DIR}.")
+            return
 
-            producer.flush()
-        except Exception as e:
-            print(f"Error processing {local_path}: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            if os.path.exists(local_path):
-                os.remove(local_path)
+        total_sent = 0
+        for file in files:
+            filepath = os.path.join(DATA_DIR, file)
+            print(f"  Processing {file}...")
 
-    def bulk_load_data(producer, energy_files, weather_files):
-        """Load all data and push to Kafka."""
-        os.makedirs(TEMP_DIR, exist_ok=True)
+            try:
+                df = pd.read_parquet(filepath)
 
-        # Sort files to process in chronological order (roughly)
-        energy_files.sort()
-        weather_files.sort()
+                # Ensure required columns exist
+                for col in required_columns:
+                    if col not in df.columns:
+                        df[col] = None # Add missing columns with null values
 
-        print("--- Processing Energy Data ---")
-        for f in energy_files:
-            process_file(producer, f, ENERGY_TOPIC, process_energy_record)
+                records = df.to_dict(orient='records')
+                sent_from_file = 0
 
-        print("--- Processing Weather Data ---")
-        for f in weather_files:
-            process_file(producer, f, WEATHER_TOPIC, process_weather_record)
+                for record in records:
+                    # Prepare record: clean NaNs and ensure correct types
+                    cleaned = clean_record(record)
 
-        print("Bulk load complete.")
+                    # Use a composite key for partitioning, e.g., time + area/station
+                    key_fields = [str(cleaned[k]) for k in [required_columns[0], required_columns[1]] if k in cleaned and cleaned[k] is not None]
+                    key = "_".join(key_fields)
+
+                    serialized_value = serializer(
+                        cleaned,
+                        SerializationContext(topic, MessageField.VALUE)
+                    )
+
+                    producer.produce(
+                        topic=topic,
+                        key=key.encode('utf-8'),
+                        value=serialized_value,
+                        on_delivery=delivery_report
+                    )
+                    sent_from_file += 1
+
+                # Poll for delivery reports
+                producer.poll(0)
+
+                total_sent += sent_from_file
+                print(f"  ✓ Queued {sent_from_file} records from {file}")
+
+            except Exception as e:
+                print(f"  ✗ Error processing {file}: {e}")
+                import traceback
+                traceback.print_exc()
+
+        print(f"  Flushing producer for topic '{topic}'...")
+        producer.flush()
+        print(f"✅ Finished replaying for topic '{topic}'. Total records sent: {total_sent}")
+
 
     def main():
-        print("Starting Bulk Loader Job (HDFS Source)...")
+        print("--- Starting Kafka Replay Job ---")
 
-        # Ensure HDFS client is ready
-        if run_hdfs_cmd(['-ls', '/']) is None:
-            print("Error: Cannot contact HDFS NameNode.")
-            return
-
-        energy_files, weather_files = wait_for_data()
-
-        if not energy_files and not weather_files:
-            print("No data found in HDFS.")
-            return
-
-        producer = create_producer()
+        producer, weather_serializer, energy_serializer = create_avro_producer_and_serializers()
         if not producer:
             return
 
-        bulk_load_data(producer, energy_files, weather_files)
+        # Replay Weather Data
+        # These are the fields defined in the Avro schema
+        weather_cols = ["stationId", "timeObserved", "parameterId", "value"]
+        # The historical files might have different names, we assume the replay job's volume
+        # contains files named appropriately or this script is adapted.
+        # For now, let's assume the historical fetcher saves with a consistent prefix.
+        replay_data(producer, weather_serializer, WEATHER_TOPIC, "historical_weather", weather_cols)
+
+        # Replay Energy Data
+        # These are the fields defined in the Avro schema
+        energy_cols = ["HourUTC", "HourDK", "PriceArea", "ConnectedArea", "ViaArea", "SharePPM", "ShareMWh", "Updated"]
+        replay_data(producer, energy_serializer, ENERGY_TOPIC, "historical_energy", energy_cols)
 
         producer.close()
-        print("Job finished successfully.")
+        print("\n--- Replay Job Completed ---")
 
     if __name__ == "__main__":
+        # Add a small delay to allow services to start, if needed
+        time.sleep(int(os.getenv("REPLAY_DELAY_SECONDS", "0")))
         main()

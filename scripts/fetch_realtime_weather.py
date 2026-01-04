@@ -23,9 +23,8 @@ from confluent_kafka.schema_registry.avro import AvroSerializer
 DMI_API_URL = "https://dmigw.govcloud.dk/v2/metObs/collections/observation/items"
 DMI_API_KEY = os.getenv("DMI_API_KEY", "b5800a05-4f0f-4584-b130-6129213728c0")
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
-# Updated to match Kubernetes service name
 SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://schema-registry:8081")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_raw_avro") # Updated topic name to match sink
+KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "weather_raw_avro")
 FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "300"))  # 5 minutes default
 
 # All weather stations - will get from Hive station_metadata
@@ -202,7 +201,7 @@ def main():
     print(f"   Kafka Topic: {KAFKA_TOPIC}")
     print(f"   Fetch Interval: {FETCH_INTERVAL}s ({FETCH_INTERVAL/60:.1f} min)")
     print(f"   Strategy: Fetch raw observations, Hive aggregates hourly")
-    print(f"{'='*70}\n")
+    print(f"{ '='*70}\n")
 
     iteration = 0
     while True:

@@ -50,11 +50,6 @@ spec:
             configMapKeyRef:
               name: backend-config
               key: PREDICTED_TOPIC
-        - name: WEATHER_TOPIC
-          valueFrom:
-            configMapKeyRef:
-              name: backend-config
-              key: WEATHER_TOPIC
         - name: CONSUMER_GROUP
           value: "database-writer"
         - name: DATABASE_URL

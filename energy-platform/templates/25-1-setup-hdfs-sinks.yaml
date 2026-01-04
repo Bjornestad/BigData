@@ -38,7 +38,7 @@ spec:
 
             echo ""
             echo "================================================================"
-            echo "CREATING HDFS SINK #1: weather_raw_avro (PARQUET ONLY)"
+            echo "CREATING HDFS SINK #1: weather_raw_avro (PARQUET)"
             echo "================================================================"
 
             # Note: hive.integration is FALSE because we create tables manually in create-historical-hive-tables job
@@ -59,6 +59,7 @@ spec:
                 "locale": "en-US",
                 "logs.dir": "/tmp/logs",
                 "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
+                "parquet.codec": "snappy",
                 "hive.integration": "false",
                 "value.converter": "io.confluent.connect.avro.AvroConverter",
                 "errors.log.enable": "true",
@@ -66,7 +67,6 @@ spec:
                 "partition.duration.ms": "86400000",
                 "schema.compatibility": "BACKWARD",
                 "topics": "weather_raw_avro",
-                "parquet.codec": "snappy",
                 "hdfs.url": "hdfs://namenode:9000",
                 "value.converter.schema.registry.url": "http://schema-registry:8081",
                 "consumer.override.auto.offset.reset": "latest",
