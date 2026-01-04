@@ -10,30 +10,40 @@ import sys
 import json
 import time
 from datetime import datetime, timedelta
-from kafka import KafkaProducer
+from kafka import KafkaProducer, KafkaConsumer
 from pyspark.sql import SparkSession
 from pyspark.ml import PipelineModel
 from pyspark.sql.functions import col, avg, max as spark_max, min as spark_min, count, sin, cos, radians, lit
 from pyspark.sql.functions import to_timestamp, year as pyspark_year, month as pyspark_month, dayofmonth, hour as pyspark_hour
+from pyspark.sql.functions import dayofweek, dayofyear, when, lag, concat, lpad
+from pyspark.sql.window import Window
+import math
 from pyspark.sql.types import StringType
 from pyspark.sql.functions import udf
 import pyspark.sql.functions as F
+import threading
 
 # Configuration
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
 OUTPUT_TOPIC = os.getenv("OUTPUT_TOPIC", "energy_predictions")
 CONSUMPTION_MODEL_PATH = os.getenv("CONSUMPTION_MODEL_PATH", "./models/energy_model_consumption_20251227_235915")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "600"))  # 10 minutes
+EVENT_DRIVEN_MODE = os.getenv("EVENT_DRIVEN_MODE", "true").lower() == "true"
+WEATHER_INPUT_TOPIC = os.getenv("WEATHER_INPUT_TOPIC", "weather_raw_avro")
+ENERGY_INPUT_TOPIC = os.getenv("ENERGY_INPUT_TOPIC", "energy_actual")
 
+mode_str = "EVENT-DRIVEN (listens to Kafka topics)" if EVENT_DRIVEN_MODE else f"POLLING (every {CHECK_INTERVAL}s)"
 print(f"""
 {'='*70}
 COMBINED 10-MIN AGGREGATION & PREDICTION SERVICE
 {'='*70}
+Mode: {mode_str}
 Source: weather_raw_avro (long format)
 Destination: weather_area_10min (10-min buckets, by DK area)
 Predictions: {OUTPUT_TOPIC} (6 predictions per hour)
 Model: {CONSUMPTION_MODEL_PATH}
-Check Interval: {CHECK_INTERVAL}s ({CHECK_INTERVAL/60:.0f} min)
+Event Topics: {WEATHER_INPUT_TOPIC}, {ENERGY_INPUT_TOPIC}
+Fallback Interval: {CHECK_INTERVAL}s ({CHECK_INTERVAL/60:.0f} min)
 {'='*70}
 """)
 
@@ -43,8 +53,11 @@ spark = SparkSession.builder \
     .appName("AggregateAndPredict") \
     .config("hive.metastore.uris", "thrift://hive-metastore:9083") \
     .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
-    .config("spark.driver.memory", "2g") \
-    .config("spark.sql.shuffle.partitions", "20") \
+    .config("spark.driver.memory", "3g") \
+    .config("spark.driver.maxResultSize", "2g") \
+    .config("spark.sql.shuffle.partitions", "10") \
+    .config("spark.sql.adaptive.enabled", "true") \
+    .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
     .config("hive.exec.dynamic.partition", "true") \
     .config("hive.exec.dynamic.partition.mode", "nonstrict") \
     .enableHiveSupport() \
@@ -113,6 +126,7 @@ except Exception as e:
 
 # Track processed 10-minute buckets
 processed_buckets = set()
+processed_buckets_lock = threading.Lock()
 
 def aggregate_latest_10min():
     """
@@ -122,15 +136,25 @@ def aggregate_latest_10min():
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checking for new weather data...")
 
     try:
-        # Read from Hive table
-        raw_df = spark.sql("SELECT * FROM weather_raw_avro")
+        # Repair table partitions to discover any new partitions added by Kafka Connect
+        print("  Repairing table partitions...")
+        spark.sql("MSCK REPAIR TABLE weather_raw_avro")
 
-        # Get latest observed timestamp
-        latest_observed = raw_df.select(spark_max(col("observed")).alias("latest")).collect()[0]["latest"]
+        # First, get the latest observation timestamp by filtering on observed timestamp
+        # Only look at last 30 minutes since new data arrives every 10 minutes
+        from datetime import datetime as dt
+        cutoff = (dt.now() - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:00Z")
+
+        latest_result = spark.sql(f"""
+            SELECT MAX(observed) as latest
+            FROM weather_raw_avro
+            WHERE observed >= '{cutoff}'
+        """).collect()[0]
+        latest_observed = latest_result["latest"]
 
         if not latest_observed:
             print("  ⚠️  No observations found")
-            return False
+            return None
 
         # Parse the latest observation timestamp
         from datetime import datetime as dt
@@ -153,6 +177,15 @@ def aggregate_latest_10min():
         print(f"  Latest observation: {latest_observed}")
         print(f"  Aggregating bucket from 30 min ago: {year}-{month:02d}-{day:02d} {hour:02d}:{minute_bucket:02d}")
 
+        bucket_key = (year, month, day, hour, minute_bucket)
+
+        # Prevent duplicate work while async write is still in-flight
+        with processed_buckets_lock:
+            if bucket_key in processed_buckets:
+                print(f"  ⏭️  Bucket already in-flight/processed: {bucket_key}")
+                return None
+            processed_buckets.add(bucket_key)
+
         # Check if already aggregated
         check_query = f"""
             SELECT COUNT(*) as count
@@ -164,18 +197,21 @@ def aggregate_latest_10min():
         existing_count = spark.sql(check_query).collect()[0]['count']
         if existing_count > 0:
             print(f"  ⏭️  Already aggregated ({existing_count} records)")
-            return False
+            return None
 
-        # Filter observations for this specific 10-minute bucket
+        # Filter observations for this specific 10-minute bucket DIRECTLY in SQL
         # Calculate end time for the bucket (handle hour rollover)
         bucket_end_dt = bucket_dt + timedelta(minutes=10)
         bucket_end_str = bucket_end_dt.strftime("%Y-%m-%dT%H:%M:00Z")
         bucket_start_str = bucket_dt.strftime("%Y-%m-%dT%H:%M:00Z")
 
-        bucket_df = raw_df.filter(
-            (col("observed") >= bucket_start_str) &
-            (col("observed") < bucket_end_str)
-        ) \
+        # Read ONLY the specific 10-minute bucket from Hive - much more memory efficient
+        bucket_df = spark.sql(f"""
+            SELECT station_id, parameter_id, value, observed
+            FROM weather_raw_avro
+            WHERE observed >= '{bucket_start_str}'
+            AND observed < '{bucket_end_str}'
+        """) \
             .withColumn("observed_ts", to_timestamp(col("observed"), "yyyy-MM-dd'T'HH:mm:ss'Z'")) \
             .withColumn("year", pyspark_year(col("observed_ts"))) \
             .withColumn("month", pyspark_month(col("observed_ts"))) \
@@ -228,59 +264,180 @@ def aggregate_latest_10min():
             (count("temp_dry").cast("int") if "temp_dry" in wide_df.columns else lit(0).cast("int")).alias("n_stations")
         )
 
-        # Reorder to match table schema and add predicted=0 flag
-        agg_df = agg_df.withColumn("predicted", lit(0)).select(
+        # Add predicted=0 flag
+        agg_df = agg_df.withColumn("predicted", lit(0))
+
+        # Reorder columns to match Hive table schema (non-partition columns first, then partition columns)
+        # Table schema: dk_area, day, hour, minute_bucket, weather columns..., predicted, year, month
+        agg_df = agg_df.select(
             "dk_area", "day", "hour", "minute_bucket",
             "temp_mean_area", "temp_max_area", "temp_min_area",
             "wind_speed_mean_area", "wind_speed_max_area",
             "wind_dir_sin_area", "wind_dir_cos_area",
-            "sun_last10min_glob_area",
-            "precip_past10min_mean_area",
+            "sun_last10min_glob_area", "precip_past10min_mean_area",
             "humidity_mean_area", "pressure_at_sea_mean_area",
             "cloud_cover_mean_area", "visibility_mean_area",
-            "n_stations",
-            "predicted",
+            "n_stations", "predicted",
             "year", "month"
         )
 
         result_count = agg_df.count()
         print(f"  ✓ Generated {result_count} 10-min aggregates")
 
-        # Write to weather_area_10min
-        agg_df.write.mode("append").insertInto("weather_area_10min")
+        # Write to weather_area_10min asynchronously (non-blocking)
+        # This way the main thread can proceed with predictions immediately
+        def async_write():
+            try:
+                # Use insertInto instead of saveAsTable to respect existing partition scheme
+                agg_df.write \
+                    .mode("append") \
+                    .format("hive") \
+                    .insertInto("weather_area_10min")
+                print(f"  ✓ Written to weather_area_10min (background)")
+            except Exception as e:
+                print(f"  ⚠️  Background write failed: {e}")
+                # allow retry if the write failed
+                with processed_buckets_lock:
+                    processed_buckets.discard(bucket_key)
 
-        print(f"  ✓ Written to weather_area_10min")
-        print(f"    Bucket: {year}-{month:02d}-{day:02d} {hour:02d}:{minute_bucket:02d}")
+        write_thread = threading.Thread(target=async_write, daemon=True)
+        write_thread.start()
 
-        return True
+        print(f"  ✓ Started background write for bucket: {year}-{month:02d}-{day:02d} {hour:02d}:{minute_bucket:02d}")
+
+        # Return the aggregated DataFrame so we can predict directly without re-querying
+        return agg_df
 
     except Exception as e:
         print(f"  ✗ Error during aggregation: {e}")
         import traceback
         traceback.print_exc()
-        return False
+        return None
 
-def make_predictions():
+def add_temporal_and_lag_features(df):
+    """
+    Add temporal and lag features to match training data
+    """
+    # 1. Cyclical time encoding
+    df = df.withColumn("hour_sin", sin(col("hour") * (2 * math.pi / 24)))
+    df = df.withColumn("hour_cos", cos(col("hour") * (2 * math.pi / 24)))
+
+    # 2. Day of year (cyclical)
+    df = df.withColumn("date_col",
+        concat(
+            col("year").cast("string"),
+            lit("-"),
+            lpad(col("month").cast("string"), 2, "0"),
+            lit("-"),
+            lpad(col("day").cast("string"), 2, "0")
+        ).cast("date")
+    )
+    df = df.withColumn("doy", dayofyear(col("date_col")))
+    df = df.withColumn("day_of_year_sin", sin(col("doy") * (2 * math.pi / 365)))
+    df = df.withColumn("day_of_year_cos", cos(col("doy") * (2 * math.pi / 365)))
+
+    # 3. Day of week and weekend
+    df = df.withColumn("day_of_week", dayofweek(col("date_col")) - 1)
+    df = df.withColumn("is_weekend", when((col("day_of_week") == 0) | (col("day_of_week") == 6), 1).otherwise(0))
+
+    # 4. Lag features from consumption_area_hourly table
+    # For each 10-min prediction, use consumption from 3+ days ago at the SAME HOUR
+    # Note: All 6 predictions in hour X use the same hourly consumption lags
+
+    # Load consumption history (3+ days old to match API delay)
+    consumption_df = spark.sql("""
+        SELECT
+            dk_area,
+            year,
+            month,
+            day,
+            hour,
+            consumption_mwh_area
+        FROM consumption_area_hourly
+        WHERE consumption_mwh_area IS NOT NULL
+    """)
+
+    # Create timestamp for joining
+    consumption_df = consumption_df.withColumn("cons_timestamp",
+        F.unix_timestamp(
+            concat(
+                lpad(col("year").cast("string"), 4, "0"), lit("-"),
+                lpad(col("month").cast("string"), 2, "0"), lit("-"),
+                lpad(col("day").cast("string"), 2, "0"), lit(" "),
+                lpad(col("hour").cast("string"), 2, "0"), lit(":00:00")
+            )
+        )
+    )
+
+    # Create timestamp for weather data (ignoring minute_bucket for hourly join)
+    df = df.withColumn("weather_timestamp",
+        F.unix_timestamp(
+            concat(
+                lpad(col("year").cast("string"), 4, "0"), lit("-"),
+                lpad(col("month").cast("string"), 2, "0"), lit("-"),
+                lpad(col("day").cast("string"), 2, "0"), lit(" "),
+                lpad(col("hour").cast("string"), 2, "0"), lit(":00:00")
+            )
+        )
+    )
+
+    # Window for lag calculations by dk_area ordered by timestamp
+    window_spec = Window.partitionBy("dk_area").orderBy("cons_timestamp")
+
+    # Add lag features: load_lag_72 (3 days = 72 hours), load_lag_168 (7 days = 168 hours)
+    consumption_df = consumption_df.withColumn("load_lag_72", lag("consumption_mwh_area", 72).over(window_spec))
+    consumption_df = consumption_df.withColumn("load_lag_168", lag("consumption_mwh_area", 168).over(window_spec))
+
+    # Rolling means
+    window_72h = Window.partitionBy("dk_area").orderBy("cons_timestamp").rowsBetween(-72, -1)
+    window_7d = Window.partitionBy("dk_area").orderBy("cons_timestamp").rowsBetween(-168, -1)
+
+    consumption_df = consumption_df.withColumn("load_mean_72h", F.avg("consumption_mwh_area").over(window_72h))
+    consumption_df = consumption_df.withColumn("load_mean_7d", F.avg("consumption_mwh_area").over(window_7d))
+
+    # Join weather with consumption lags (on dk_area and matching the hour, ignoring minute_bucket)
+    df = df.join(
+        consumption_df.select("dk_area", "cons_timestamp", "load_lag_72", "load_lag_168", "load_mean_72h", "load_mean_7d"),
+        (df.dk_area == consumption_df.dk_area) & (df.weather_timestamp == consumption_df.cons_timestamp),
+        "left"
+    ).drop(consumption_df.dk_area)
+
+    # Drop temporary columns
+    df = df.drop("date_col", "doy", "weather_timestamp", "cons_timestamp")
+
+    return df
+
+def make_predictions(new_weather_df=None):
     """
     Make energy consumption predictions from latest 10-minute weather data
+
+    Args:
+        new_weather_df: Optional DataFrame with newly aggregated weather data.
+                       If provided, predictions will be made on this data directly.
+                       If None, will query unpredicted data from weather_area_10min table.
     """
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Making predictions...")
 
     try:
-        # Get weather data that hasn't been predicted yet (not in predicted_buckets table)
-        weather_df = spark.sql("""
-            SELECT w.*
-            FROM weather_area_10min w
-            LEFT JOIN predicted_buckets p
-              ON w.dk_area = p.dk_area
-              AND w.year = p.year
-              AND w.month = p.month
-              AND w.day = p.day
-              AND w.hour = p.hour
-              AND w.minute_bucket = p.minute_bucket
-            WHERE p.dk_area IS NULL
-            ORDER BY w.year DESC, w.month DESC, w.day DESC, w.hour DESC, w.minute_bucket DESC
-        """)
+        # Use provided DataFrame or query for unpredicted data
+        if new_weather_df is not None:
+            weather_df = new_weather_df
+            print("  ✓ Using newly aggregated weather data")
+        else:
+            # Get weather data that hasn't been predicted yet (not in predicted_buckets table)
+            weather_df = spark.sql("""
+                SELECT w.*
+                FROM weather_area_10min w
+                LEFT JOIN predicted_buckets p
+                  ON w.dk_area = p.dk_area
+                  AND w.year = p.year
+                  AND w.month = p.month
+                  AND w.day = p.day
+                  AND w.hour = p.hour
+                  AND w.minute_bucket = p.minute_bucket
+                WHERE p.dk_area IS NULL
+                ORDER BY w.year DESC, w.month DESC, w.day DESC, w.hour DESC, w.minute_bucket DESC
+            """)
 
         if weather_df.count() == 0:
             print("  ⏭️  No unpredicted weather data available")
@@ -315,13 +472,19 @@ def make_predictions():
                                  .withColumn("sun_last1h_glob_area", lit(None).cast('double')) \
                                  .withColumn("precip_past1h_mean_area", lit(None).cast('double'))
 
+        # Add temporal and lag features (critical for model accuracy!)
+        print("\n  🔧 Adding temporal and lag features...")
+        new_weather = add_temporal_and_lag_features(new_weather)
+
         # Debug: Show input features
         print("\n  📊 Input features for prediction:")
         new_weather.select("dk_area", "month", "day", "hour", "minute_bucket",
-                          "temp_mean_area", "wind_speed_mean_area", "n_stations").show(10, False)
+                          "temp_mean_area", "wind_speed_mean_area", "hour_sin", "hour_cos",
+                          "load_lag_72", "load_lag_168", "n_stations").show(10, False)
 
         # Make predictions
         predictions_df = consumption_model.transform(new_weather)
+
 
         # Select relevant columns
         output_df = predictions_df.select(
@@ -331,24 +494,35 @@ def make_predictions():
             F.col("prediction").alias("predicted_consumption")
         )
 
-        # Publish to Kafka
+        # Publish to Kafka - combine DK1 and DK2 into single Denmark prediction
         predictions_list = output_df.collect()
 
-        for row in predictions_list:
-            # Convert timestamp to ISO format for frontend compatibility
-            timestamp_iso = f"{row['year']:04d}-{row['month']:02d}-{row['day']:02d}T{row['hour']:02d}:{row['minute_bucket']:02d}:00Z"
+        # Group predictions by timestamp and sum consumption across DK1 and DK2
+        from collections import defaultdict
+        combined_predictions = defaultdict(lambda: {"consumption": 0, "year": 0, "month": 0, "day": 0, "hour": 0, "minute_bucket": 0})
 
+        for row in predictions_list:
+            timestamp_iso = f"{row['year']:04d}-{row['month']:02d}-{row['day']:02d}T{row['hour']:02d}:{row['minute_bucket']:02d}:00Z"
+            combined_predictions[timestamp_iso]["consumption"] += float(row["predicted_consumption"])
+            combined_predictions[timestamp_iso]["year"] = row["year"]
+            combined_predictions[timestamp_iso]["month"] = row["month"]
+            combined_predictions[timestamp_iso]["day"] = row["day"]
+            combined_predictions[timestamp_iso]["hour"] = row["hour"]
+            combined_predictions[timestamp_iso]["minute_bucket"] = row["minute_bucket"]
+
+        # Send combined predictions
+        for timestamp_iso, pred_data in combined_predictions.items():
             prediction = {
-                "dk_area": row["dk_area"],
+                "dk_area": "DK",  # Combined Denmark
                 "timestamp": timestamp_iso,
-                "year": row["year"],
-                "month": row["month"],
-                "day": row["day"],
-                "hour": row["hour"],
-                "minute_bucket": row["minute_bucket"],
-                "value": float(row["predicted_consumption"]),  # Backend fallback
+                "year": pred_data["year"],
+                "month": pred_data["month"],
+                "day": pred_data["day"],
+                "hour": pred_data["hour"],
+                "minute_bucket": pred_data["minute_bucket"],
+                "value": pred_data["consumption"],  # Backend fallback
                 "predictions": {
-                    "consumption_mwh": float(row["predicted_consumption"]),
+                    "consumption_mwh": pred_data["consumption"],
                     "production_mwh": 0,
                     "net_balance_mwh": 0
                 },
@@ -356,7 +530,7 @@ def make_predictions():
                 "prediction_time": datetime.now().isoformat()
             }
 
-            key = f"{row['dk_area']}_{timestamp_iso}"
+            key = f"DK_{timestamp_iso}"
 
             producer.send(
                 OUTPUT_TOPIC,
@@ -364,10 +538,10 @@ def make_predictions():
                 value=prediction
             )
 
-            print(f"  ✓ {row['dk_area']} {timestamp_iso}: {row['predicted_consumption']:.2f} MWh")
+            print(f"  ✓ DK {timestamp_iso}: {pred_data['consumption']:.2f} MWh (combined)")
 
         producer.flush()
-        print(f"  ✓ Published {len(predictions_list)} predictions")
+        print(f"  ✓ Published {len(combined_predictions)} combined predictions")
 
         # Record predicted buckets in tracking table
         from pyspark.sql import Row
@@ -388,7 +562,8 @@ def make_predictions():
         if predicted_records:
             predicted_df = spark.createDataFrame(predicted_records)
             predicted_df = predicted_df.withColumn("predicted_at", current_timestamp())
-            predicted_df.write.mode("append").insertInto("predicted_buckets")
+            # Use saveAsTable with name-based matching instead of insertInto with positional matching
+            predicted_df.write.mode("append").format("hive").saveAsTable("predicted_buckets")
             print(f"  ✓ Recorded {len(predicted_records)} buckets as predicted")
 
     except Exception as e:
@@ -396,32 +571,303 @@ def make_predictions():
         import traceback
         traceback.print_exc()
 
+def aggregate_consumption_area_hourly():
+    """
+    Aggregate raw consumption data from energy_actual table into consumption_area_hourly
+    Processes all raw records and aggregates by PriceArea (mapped to dk_area) and hour
+    """
+    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Aggregating consumption data...")
+
+    try:
+        # Repair table partitions to discover any new partitions
+        print("  Repairing energy_actual table partitions...")
+        spark.sql("MSCK REPAIR TABLE energy_actual")
+
+        # Only read recent data (last 7 days) to avoid memory issues
+        # Older data has already been aggregated in previous runs
+        from datetime import datetime as dt
+        cutoff_date = (dt.now() - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00")
+
+        raw_consumption_df = spark.sql(f"""
+            SELECT * FROM energy_actual
+            WHERE HourDK >= '{cutoff_date}'
+        """)
+
+        total_records = raw_consumption_df.count()
+        if total_records == 0:
+            print("  ⚠️  No raw consumption data found")
+            return None
+
+        print(f"  ✓ Found {total_records:,} raw consumption records (last 7 days)")
+
+        # Parse HourDK timestamp and extract time components
+        # HourDK format: "2025-01-03T21:00:00"
+        processed_df = raw_consumption_df \
+            .withColumn("hour_ts", to_timestamp(col("HourDK"), "yyyy-MM-dd'T'HH:mm:ss")) \
+            .withColumn("year", pyspark_year(col("hour_ts")).cast("int")) \
+            .withColumn("month", pyspark_month(col("hour_ts")).cast("int")) \
+            .withColumn("day", dayofmonth(col("hour_ts")).cast("int")) \
+            .withColumn("hour", pyspark_hour(col("hour_ts")).cast("int"))
+
+        # Map PriceArea to dk_area (DK1 or DK2)
+        processed_df = processed_df.withColumn(
+            "dk_area",
+            when(col("PriceArea") == "DK1", "DK1")
+            .when(col("PriceArea") == "DK2", "DK2")
+            .otherwise(None)
+        ).filter(col("dk_area").isNotNull())
+
+        # Aggregate ShareMWh by dk_area and hour
+        # Sum all consumption across ConnectedArea, ViaArea for each PriceArea and hour
+        agg_df = processed_df.groupBy("dk_area", "year", "month", "day", "hour").agg(
+            F.sum("ShareMWh").alias("consumption_mwh_area")
+        )
+
+        agg_count = agg_df.count()
+        print(f"  ✓ Generated {agg_count:,} hourly aggregates")
+
+        # Check which records already exist - use a left anti join with explicit casting
+        # Create a temporary view with correct types
+        agg_df.createOrReplaceTempView("temp_agg_consumption")
+
+        new_records_df = spark.sql("""
+            SELECT t.dk_area,
+                   t.consumption_mwh_area,
+                   t.year,
+                   t.month,
+                   t.day,
+                   t.hour
+            FROM temp_agg_consumption t
+            LEFT ANTI JOIN consumption_area_hourly e
+              ON t.dk_area = e.dk_area
+              AND t.year = e.year
+              AND t.month = e.month
+              AND t.day = e.day
+              AND t.hour = e.hour
+        """)
+
+        new_count = new_records_df.count()
+
+        if new_count == 0:
+            print(f"  ⏭️  All records already aggregated")
+            return None
+
+        print(f"  ✓ Found {new_count:,} new hourly records to insert")
+
+        # Write new records asynchronously (non-blocking)
+        def async_write():
+            try:
+                new_records_df.write \
+                    .mode("append") \
+                    .partitionBy("dk_area", "year", "month") \
+                    .format("hive") \
+                    .saveAsTable("consumption_area_hourly")
+                print(f"  ✓ Written to consumption_area_hourly (background)")
+            except Exception as e:
+                print(f"  ⚠️  Background write to consumption_area_hourly failed: {e}")
+
+        write_thread = threading.Thread(target=async_write, daemon=True)
+        write_thread.start()
+
+        # Show sample of newly aggregated data
+        sample_records = new_records_df.orderBy(
+            col("year").desc(),
+            col("month").desc(),
+            col("day").desc(),
+            col("hour").desc()
+        ).limit(5).collect()
+
+        print(f"  ✓ Started background write for {new_count:,} new hourly records")
+        print("\n  📊 Sample of newly aggregated records:")
+        for row in sample_records:
+            print(f"    {row['dk_area']} {row['year']}-{row['month']:02d}-{row['day']:02d} {row['hour']:02d}:00 → {row['consumption_mwh_area']:.2f} MWh")
+
+        # Return new records so lag features can be recalculated if needed
+        return new_records_df
+
+    except Exception as e:
+        print(f"  ✗ Error aggregating consumption data: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def run_weather_pipeline():
+    """Execute weather aggregation and prediction pipeline (triggered by weather events)"""
+    try:
+        # Step 1: Aggregate new weather data (10-minute buckets)
+        new_weather_df = aggregate_latest_10min()
+
+        # Step 2: Make predictions ONLY if new weather data was aggregated
+        if new_weather_df is not None:
+            make_predictions(new_weather_df)
+        else:
+            print("  ⏭️  No new weather aggregation, skipping predictions")
+
+    except Exception as e:
+        print(f"\n✗ Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+def run_energy_pipeline():
+    """Execute energy consumption aggregation (triggered by energy events)"""
+    try:
+        aggregate_consumption_area_hourly()
+    except Exception as e:
+        print(f"\n✗ Error: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+
+def kafka_event_listener():
+    """Listen to Kafka topics and trigger aggregations when new data arrives"""
+    print(f"\n🎧 Starting Kafka event listener...")
+    print(f"   Listening to: {WEATHER_INPUT_TOPIC}, {ENERGY_INPUT_TOPIC}")
+
+    try:
+        # Create Kafka consumer
+        consumer = KafkaConsumer(
+            WEATHER_INPUT_TOPIC,
+            ENERGY_INPUT_TOPIC,
+            bootstrap_servers=KAFKA_BOOTSTRAP,
+            group_id='aggregate-predict-service',
+            auto_offset_reset='latest',  # Only process new messages
+            enable_auto_commit=True,
+            consumer_timeout_ms=10000,  # 10 second timeout for checking
+            value_deserializer=lambda x: x  # We don't need to deserialize, just detect new messages
+        )
+
+        print(f"   ✓ Kafka consumer connected\n")
+
+        last_weather_trigger = 0
+        last_energy_trigger = 0
+        min_trigger_interval = 60  # Minimum 60 seconds between triggers to avoid excessive processing
+
+        while True:
+            # Poll for new messages
+            messages = consumer.poll(timeout_ms=10000)
+
+            if messages:
+                current_time = time.time()
+
+                # Count messages by topic
+                weather_count = sum(len(msgs) for topic_partition, msgs in messages.items()
+                                  if topic_partition.topic == WEATHER_INPUT_TOPIC)
+                energy_count = sum(len(msgs) for topic_partition, msgs in messages.items()
+                                 if topic_partition.topic == ENERGY_INPUT_TOPIC)
+
+                # Trigger weather pipeline if weather data arrived
+                if weather_count > 0:
+                    if current_time - last_weather_trigger >= min_trigger_interval:
+                        print(f"\n📨 New weather data detected: {weather_count} messages")
+                        print(f"{'='*70}")
+                        print(f"WEATHER EVENT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        print(f"{'='*70}")
+
+                        # Run weather aggregation + prediction and reset timer
+                        run_weather_pipeline_with_timer()
+                        last_weather_trigger = current_time
+                    else:
+                        time_remaining = min_trigger_interval - (current_time - last_weather_trigger)
+                        print(f"   ⏱️  Weather data arrived, waiting {time_remaining:.0f}s...")
+
+                # Trigger energy pipeline if energy data arrived
+                if energy_count > 0:
+                    if current_time - last_energy_trigger >= min_trigger_interval:
+                        print(f"\n📨 New energy data detected: {energy_count} messages")
+                        print(f"{'='*70}")
+                        print(f"ENERGY EVENT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        print(f"{'='*70}")
+
+                        # Run energy aggregation only (predictions use lag features, don't need immediate trigger)
+                        run_energy_pipeline()
+                        last_energy_trigger = current_time
+                    else:
+                        time_remaining = min_trigger_interval - (current_time - last_energy_trigger)
+                        print(f"   ⏱️  Energy data arrived, waiting {time_remaining:.0f}s...")
+            else:
+                # No messages, just continue listening
+                pass
+
+    except Exception as e:
+        print(f"\n✗ Kafka event listener error: {e}")
+        import traceback
+        traceback.print_exc()
+        # Fall back to polling mode if event listener fails
+        raise  # Re-raise so main thread knows to fall back
+
+# Global timer for tracking last execution
+last_execution_time = 0
+timer_lock = threading.Lock()
+
+def reset_timer():
+    """Reset the execution timer when pipeline runs"""
+    global last_execution_time
+    with timer_lock:
+        last_execution_time = time.time()
+
+def run_weather_pipeline_with_timer():
+    """Execute the weather pipeline and reset timer"""
+    run_weather_pipeline()
+    reset_timer()
+
 def main():
-    """Main loop - aggregate and predict every 10 minutes"""
-    iteration = 0
+    """Main entry point - either event-driven or polling mode"""
+    global last_execution_time
 
-    while True:
-        iteration += 1
-        print(f"\n{'='*70}")
-        print(f"CHECK #{iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"{'='*70}")
+    if EVENT_DRIVEN_MODE:
+        print(f"\n🚀 Starting in EVENT-DRIVEN mode")
+        print(f"   Pipeline triggers when new data arrives in Kafka")
+        print(f"   Fallback runs if no events for {CHECK_INTERVAL}s\n")
 
-        try:
-            # Step 1: Aggregate new weather data (10-minute buckets)
-            new_data_aggregated = aggregate_latest_10min()
+        # Start event listener in background thread
+        event_thread = threading.Thread(
+            target=kafka_event_listener,
+            daemon=True,
+            name="KafkaEventListener"
+        )
+        event_thread.start()
 
-            # Step 2: Always check for predictions (even if no new aggregation)
-            # This ensures we make predictions on existing aggregated data after restart
-            make_predictions()
+        # Initialize timer
+        reset_timer()
 
-        except Exception as e:
-            print(f"\n✗ Error: {e}")
-            import traceback
-            traceback.print_exc()
+        # Keep main thread alive with smart fallback
+        iteration = 0
+        while True:
+            # Check how long since last execution
+            with timer_lock:
+                time_since_last = time.time() - last_execution_time
 
-        # Wait before next check
-        print(f"\n  Sleeping for {CHECK_INTERVAL}s ({CHECK_INTERVAL/60:.0f} min)...")
-        time.sleep(CHECK_INTERVAL)
+            # If enough time passed without events, run fallback
+            if time_since_last >= CHECK_INTERVAL:
+                iteration += 1
+                print(f"\n{'='*70}")
+                print(f"FALLBACK TRIGGER #{iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"   (No weather events for {time_since_last:.0f}s)")
+                print(f"{'='*70}")
+
+                # Run weather pipeline as fallback
+                run_weather_pipeline_with_timer()
+
+            # Sleep for short intervals to check timer frequently
+            time.sleep(10)  # Check every 10 seconds
+    else:
+        print(f"\n🔄 Starting in POLLING mode")
+        print(f"   Weather pipeline runs every {CHECK_INTERVAL}s\n")
+
+        iteration = 0
+        while True:
+            iteration += 1
+            print(f"\n{'='*70}")
+            print(f"CHECK #{iteration} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"{'='*70}")
+
+            # Run weather pipeline on schedule
+            run_weather_pipeline()
+
+            # Wait before next check
+            print(f"\n  Sleeping for {CHECK_INTERVAL}s ({CHECK_INTERVAL/60:.0f} min)...")
+            time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
     try:
