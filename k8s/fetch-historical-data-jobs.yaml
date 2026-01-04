@@ -295,9 +295,9 @@ spec:
             cd /app/scripts
 
             echo "===== FETCHING 2025 DATA ====="
-            python3 fetch_historical_weather.py --start-date "2021-01-01" --end-date "2026-01-03"
+            python3 fetch_historical_weather.py --start-date "2025-01-01" --end-date "2026-01-04"
             sleep 30
-            python3 fetch_historical_energy.py --start-date "2021-01-01" --end-date "2026-01-03"
+            python3 fetch_historical_energy.py --start-date "2025-01-01" --end-date "2026-01-04"
             echo "✓ 2025 complete"
             echo "Energy data in HDFS:"
             hdfs dfs -ls -R hdfs://namenode:9000/user/hive/warehouse/energy_actual/ || echo "No energy data found"

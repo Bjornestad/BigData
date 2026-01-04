@@ -21,7 +21,7 @@ spec:
           - |
             set -e
             echo "Installing dependencies..."
-            pip install -q --no-cache-dir requests pandas kafka-python
+            pip install -q --no-cache-dir requests confluent-kafka[avro] attrs httpx
 
             echo "Starting actual energy data fetcher..."
             cd /app/scripts
@@ -29,10 +29,12 @@ spec:
         env:
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "kafka-bootstrap:9092"
-        - name: KAFKA_TOPIC
+        - name: SCHEMA_REGISTRY_URL
+          value: "http://kafka-schema-registry:8081"
+        - name: ENERGY_KAFKA_TOPIC
           value: "energy_actual"
-        - name: FETCH_INTERVAL
-          value: "3600"  # 1 hour (energy data is timestamped hourly)
+        - name: ENERGY_FETCH_INTERVAL
+          value: "600"  # 10 minutes
         volumeMounts:
         - name: code
           mountPath: /app

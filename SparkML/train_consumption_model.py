@@ -29,8 +29,8 @@ WEATHER_FEATURES = [
     "humidity",
     "pressure",
     "pressure_at_sea",
-    "wind_dir_sin_area",
-    "wind_dir_cos_area",
+    "wind_dir_sin",
+    "wind_dir_cos",
     "wind_speed",
     "wind_max",
     "wind_min",
@@ -110,34 +110,38 @@ def load_and_join_data(spark):
             month,
             day,
             hour,
-            temp_mean_area as temp_dry,
-            temp_min_area as temp_dew,
-            temp_grass_mean_area as temp_grass,
-            temp_soil_mean_area as temp_soil,
-            humidity_mean_area as humidity,
-            pressure_at_sea_mean_area as pressure,
-            pressure_at_sea_mean_area as pressure_at_sea,
-            wind_dir_sin_area,
-            wind_dir_cos_area,
-            wind_speed_mean_area as wind_speed,
-            wind_speed_max_area as wind_max,
-            wind_speed_mean_area as wind_min,
-            precip_past10min_mean_area as precip_past10min,
-            precip_past10min_mean_area as precip_dur_past10min,
-            visibility_mean_area as visibility,
-            visibility_mean_area as visib_mean_last10min,
-            cloud_cover_mean_area as cloud_cover,
-            cloud_cover_mean_area as cloud_height,
-            cloud_cover_mean_area as weather,
-            radia_glob_past1h_area as radia_glob,
-            radia_glob_past1h_area as radia_glob_past1h,
-            sun_last10min_glob_area as sun_last10min_glob,
-            CAST(n_stations AS INT) as n_stations
+            temp_dry,
+            temp_dew,
+            temp_grass,
+            temp_soil,
+            humidity,
+            pressure,
+            pressure_at_sea,
+            wind_dir,
+            wind_speed,
+            wind_max,
+            wind_min,
+            precip_past10min,
+            precip_dur_past10min,
+            visibility,
+            visib_mean_last10min,
+            cloud_cover,
+            cloud_height,
+            weather,
+            radia_glob,
+            radia_glob_past1h,
+            sun_last10min_glob,
+            n_stations
         FROM weather_area_hourly
     """)
 
     weather_count = weather_df.count()
     print(f"  Weather records: {weather_count:,}")
+
+    # Add cyclical encoding for wind direction
+    print("  Adding cyclical encoding for wind_dir...")
+    weather_df = weather_df.withColumn('wind_dir_sin', sin(radians(col('wind_dir')))) \
+                           .withColumn('wind_dir_cos', cos(radians(col('wind_dir'))))
 
     # Load consumption data (hourly aggregated)
     print("\nLoading hourly consumption data...")

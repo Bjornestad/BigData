@@ -26,7 +26,7 @@ import threading
 # Configuration
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
 OUTPUT_TOPIC = os.getenv("OUTPUT_TOPIC", "energy_predictions")
-CONSUMPTION_MODEL_PATH = os.getenv("CONSUMPTION_MODEL_PATH", "./models/energy_model_consumption_20251227_235915")
+CONSUMPTION_MODEL_PATH = os.getenv("CONSUMPTION_MODEL_PATH", "hdfs://namenode:9000/user/hive/warehouse/models")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "600"))  # 10 minutes
 EVENT_DRIVEN_MODE = os.getenv("EVENT_DRIVEN_MODE", "true").lower() == "true"
 WEATHER_INPUT_TOPIC = os.getenv("WEATHER_INPUT_TOPIC", "weather_raw_avro")
@@ -101,13 +101,55 @@ def station_to_dk_area(station_id):
 
 station_to_dk_area_udf = udf(station_to_dk_area, StringType())
 
-# Load consumption model
+# Load consumption model - automatically find latest if path is a directory
 print("Loading consumption model...")
 try:
+    from py4j.protocol import Py4JJavaError
+
+    # If CONSUMPTION_MODEL_PATH is a directory, find the latest model using Spark
+    if not CONSUMPTION_MODEL_PATH.endswith("energy_consumption_model_"):
+        try:
+            # Use Spark's Hadoop FileSystem API to list directory
+            # Get Hadoop configuration from Spark
+            hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+            fs = spark.sparkContext._jvm.org.apache.hadoop.fs.FileSystem.get(
+                spark.sparkContext._jvm.java.net.URI(CONSUMPTION_MODEL_PATH),
+                hadoop_conf
+            )
+
+            path = spark.sparkContext._jvm.org.apache.hadoop.fs.Path(CONSUMPTION_MODEL_PATH)
+
+            # List files in directory
+            if fs.exists(path):
+                file_statuses = fs.listStatus(path)
+                model_dirs = []
+
+                for status in file_statuses:
+                    file_path = status.getPath().toString()
+                    if 'energy_consumption_model_' in file_path:
+                        model_dirs.append(file_path)
+
+                if model_dirs:
+                    # Sort by name (timestamp suffix) and get latest
+                    latest_model = sorted(model_dirs)[-1]
+                    print(f"  Found {len(model_dirs)} models, using latest: {latest_model.split('/')[-1]}")
+                    CONSUMPTION_MODEL_PATH = latest_model
+                else:
+                    print(f"  No models found in {CONSUMPTION_MODEL_PATH}")
+                    sys.exit(1)
+            else:
+                print(f"  Model directory not found: {CONSUMPTION_MODEL_PATH}")
+                sys.exit(1)
+        except Exception as dir_error:
+            print(f"  Could not list directory (assuming direct model path): {dir_error}")
+            # Assume it's a direct model path and try to load it
+
     consumption_model = PipelineModel.load(CONSUMPTION_MODEL_PATH)
-    print("✓ Consumption model loaded\n")
+    print(f"✓ Consumption model loaded from: {CONSUMPTION_MODEL_PATH.split('/')[-1]}\n")
 except Exception as e:
     print(f"✗ Failed to load model: {e}")
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
 
 # Initialize Kafka producer
@@ -136,19 +178,39 @@ def aggregate_latest_10min():
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Checking for new weather data...")
 
     try:
-        # Repair table partitions to discover any new partitions added by Kafka Connect
-        print("  Repairing table partitions...")
-        spark.sql("MSCK REPAIR TABLE weather_raw_avro")
+        # Only repair partitions once per day (when day changes) to avoid overhead
+        # Kafka Connect should auto-register partitions via hive.integration, but sometimes
+        # there's a delay, so we repair once daily to catch any missed partitions
+        from datetime import datetime as dt
+        current_day = dt.now().day
+
+        # Track last repair day in a global variable (persists across iterations in same process)
+        global last_repair_day
+        if 'last_repair_day' not in globals() or last_repair_day != current_day:
+            print("  Repairing table partitions (daily check)...")
+            spark.sql("MSCK REPAIR TABLE weather_raw_avro")
+            last_repair_day = current_day
+        else:
+            print("  Skipping partition repair (already done today)")
 
         # First, get the latest observation timestamp by filtering on observed timestamp
         # Only look at last 30 minutes since new data arrives every 10 minutes
         from datetime import datetime as dt
-        cutoff = (dt.now() - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:00Z")
+        now = dt.now()
+        cutoff = (now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:00Z")
+
+        # Use partition pruning to only scan recent partitions
+        cutoff_year = now.year
+        cutoff_month = now.month
+        cutoff_day = now.day
 
         latest_result = spark.sql(f"""
             SELECT MAX(observed) as latest
             FROM weather_raw_avro
-            WHERE observed >= '{cutoff}'
+            WHERE year = {cutoff_year}
+            AND month = {cutoff_month}
+            AND day = {cutoff_day}
+            AND observed >= '{cutoff}'
         """).collect()[0]
         latest_observed = latest_result["latest"]
 
@@ -205,11 +267,20 @@ def aggregate_latest_10min():
         bucket_end_str = bucket_end_dt.strftime("%Y-%m-%dT%H:%M:00Z")
         bucket_start_str = bucket_dt.strftime("%Y-%m-%dT%H:%M:00Z")
 
+        # Extract partition values for efficient partition pruning
+        bucket_year = bucket_dt.year
+        bucket_month = bucket_dt.month
+        bucket_day = bucket_dt.day
+
         # Read ONLY the specific 10-minute bucket from Hive - much more memory efficient
+        # CRITICAL: Filter on partition columns (year, month, day) FIRST for partition pruning
         bucket_df = spark.sql(f"""
             SELECT station_id, parameter_id, value, observed
             FROM weather_raw_avro
-            WHERE observed >= '{bucket_start_str}'
+            WHERE year = {bucket_year}
+            AND month = {bucket_month}
+            AND day = {bucket_day}
+            AND observed >= '{bucket_start_str}'
             AND observed < '{bucket_end_str}'
         """) \
             .withColumn("observed_ts", to_timestamp(col("observed"), "yyyy-MM-dd'T'HH:mm:ss'Z'")) \
@@ -247,20 +318,47 @@ def aggregate_latest_10min():
             return spark_min(col_name) if col_name in wide_df.columns else lit(None).cast('double')
 
         # Aggregate by DK area for 10-minute bucket
+        # Use raw parameter names (no _area suffix) to match training model
         agg_df = wide_df.groupBy("dk_area", "year", "month", "day", "hour", "minute_bucket").agg(
-            safe_avg("temp_dry").alias("temp_mean_area"),
-            safe_max("temp_dry").alias("temp_max_area"),
-            safe_min("temp_dry").alias("temp_min_area"),
-            safe_avg("wind_speed").alias("wind_speed_mean_area"),
-            safe_max("wind_max").alias("wind_speed_max_area"),
-            (avg(sin(radians(col("wind_dir")))) if "wind_dir" in wide_df.columns else lit(None).cast('double')).alias("wind_dir_sin_area"),
-            (avg(cos(radians(col("wind_dir")))) if "wind_dir" in wide_df.columns else lit(None).cast('double')).alias("wind_dir_cos_area"),
-            safe_avg("sun_last10min_glob").alias("sun_last10min_glob_area"),
-            safe_avg("precip_past10min").alias("precip_past10min_mean_area"),
-            safe_avg("humidity").alias("humidity_mean_area"),
-            safe_avg("pressure_at_sea").alias("pressure_at_sea_mean_area"),
-            safe_avg("cloud_cover").alias("cloud_cover_mean_area"),
-            safe_avg("visibility").alias("visibility_mean_area"),
+            # Temperature parameters (matching model training)
+            safe_avg("temp_dry").alias("temp_dry"),
+            safe_avg("temp_dew").alias("temp_dew"),
+            safe_avg("temp_grass").alias("temp_grass"),
+            safe_avg("temp_soil").alias("temp_soil"),
+
+            # Humidity and Pressure
+            safe_avg("humidity").alias("humidity"),
+            safe_avg("pressure").alias("pressure"),
+            safe_avg("pressure_at_sea").alias("pressure_at_sea"),
+
+            # Wind parameters with cyclical encoding
+            (avg(sin(radians(col("wind_dir")))) if "wind_dir" in wide_df.columns else lit(None).cast('double')).alias("wind_dir_sin"),
+            (avg(cos(radians(col("wind_dir")))) if "wind_dir" in wide_df.columns else lit(None).cast('double')).alias("wind_dir_cos"),
+            safe_avg("wind_speed").alias("wind_speed"),
+            safe_max("wind_max").alias("wind_max"),
+            safe_avg("wind_min").alias("wind_min"),
+
+            # Precipitation
+            safe_avg("precip_past10min").alias("precip_past10min"),
+            safe_avg("precip_dur_past10min").alias("precip_dur_past10min"),
+
+            # Visibility
+            safe_avg("visibility").alias("visibility"),
+            safe_avg("visib_mean_last10min").alias("visib_mean_last10min"),
+
+            # Cloud
+            safe_avg("cloud_cover").alias("cloud_cover"),
+            safe_avg("cloud_height").alias("cloud_height"),
+
+            # Weather code
+            safe_avg("weather").alias("weather"),
+
+            # Solar/Radiation
+            safe_avg("radia_glob").alias("radia_glob"),
+            safe_avg("radia_glob_past1h").alias("radia_glob_past1h"),
+            safe_avg("sun_last10min_glob").alias("sun_last10min_glob"),
+
+            # Station count
             (count("temp_dry").cast("int") if "temp_dry" in wide_df.columns else lit(0).cast("int")).alias("n_stations")
         )
 
@@ -268,15 +366,18 @@ def aggregate_latest_10min():
         agg_df = agg_df.withColumn("predicted", lit(0))
 
         # Reorder columns to match Hive table schema (non-partition columns first, then partition columns)
-        # Table schema: dk_area, day, hour, minute_bucket, weather columns..., predicted, year, month
+        # Using raw parameter names (no _area suffix) to match model training
         agg_df = agg_df.select(
             "dk_area", "day", "hour", "minute_bucket",
-            "temp_mean_area", "temp_max_area", "temp_min_area",
-            "wind_speed_mean_area", "wind_speed_max_area",
-            "wind_dir_sin_area", "wind_dir_cos_area",
-            "sun_last10min_glob_area", "precip_past10min_mean_area",
-            "humidity_mean_area", "pressure_at_sea_mean_area",
-            "cloud_cover_mean_area", "visibility_mean_area",
+            # All 23 weather parameters in same order as training model
+            "temp_dry", "temp_dew", "temp_grass", "temp_soil",
+            "humidity", "pressure", "pressure_at_sea",
+            "wind_dir_sin", "wind_dir_cos",
+            "wind_speed", "wind_max", "wind_min",
+            "precip_past10min", "precip_dur_past10min",
+            "visibility", "visib_mean_last10min",
+            "cloud_cover", "cloud_height", "weather",
+            "radia_glob", "radia_glob_past1h", "sun_last10min_glob",
             "n_stations", "predicted",
             "year", "month"
         )
@@ -463,15 +564,6 @@ def make_predictions(new_weather_df=None):
 
         print(f"  ✓ Found {new_weather.count()} new weather records")
 
-        # Add missing columns that consumption model expects (10-min table has limited features)
-        # Model uses Imputer so NULL values are OK
-        new_weather = new_weather.withColumn("temp_grass_mean_area", lit(None).cast('double')) \
-                                 .withColumn("temp_soil_mean_area", lit(None).cast('double')) \
-                                 .withColumn("wind_gust_always_past1h_max_area", lit(None).cast('double')) \
-                                 .withColumn("radia_glob_past1h_area", lit(None).cast('double')) \
-                                 .withColumn("sun_last1h_glob_area", lit(None).cast('double')) \
-                                 .withColumn("precip_past1h_mean_area", lit(None).cast('double'))
-
         # Add temporal and lag features (critical for model accuracy!)
         print("\n  🔧 Adding temporal and lag features...")
         new_weather = add_temporal_and_lag_features(new_weather)
@@ -479,7 +571,7 @@ def make_predictions(new_weather_df=None):
         # Debug: Show input features
         print("\n  📊 Input features for prediction:")
         new_weather.select("dk_area", "month", "day", "hour", "minute_bucket",
-                          "temp_mean_area", "wind_speed_mean_area", "hour_sin", "hour_cos",
+                          "temp_dry", "wind_speed", "hour_sin", "hour_cos",
                           "load_lag_72", "load_lag_168", "n_stations").show(10, False)
 
         # Make predictions
@@ -579,9 +671,19 @@ def aggregate_consumption_area_hourly():
     print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Aggregating consumption data...")
 
     try:
-        # Repair table partitions to discover any new partitions
-        print("  Repairing energy_actual table partitions...")
-        spark.sql("MSCK REPAIR TABLE energy_actual")
+        # Only repair partitions once per day (when day changes) to avoid overhead
+        # Kafka Connect should auto-register partitions via hive.integration
+        from datetime import datetime as dt
+        current_day = dt.now().day
+
+        # Track last repair day for energy table
+        global last_energy_repair_day
+        if 'last_energy_repair_day' not in globals() or last_energy_repair_day != current_day:
+            print("  Repairing energy_actual table partitions (daily check)...")
+            spark.sql("MSCK REPAIR TABLE energy_actual")
+            last_energy_repair_day = current_day
+        else:
+            print("  Skipping energy partition repair (already done today)")
 
         # Only read recent data (last 7 days) to avoid memory issues
         # Older data has already been aggregated in previous runs

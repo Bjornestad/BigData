@@ -13,6 +13,73 @@ spec:
       labels:
         app: aggregate-and-predict
     spec:
+      serviceAccountName: pipeline-waiter
+
+      initContainers:
+      - name: wait-for-pipeline
+        image: bitnami/kubectl:latest
+        command: ["/bin/sh", "-c"]
+        args:
+          - |
+            set -e
+            ns="bd-bd-gr-08"
+
+            echo "============================================================"
+            echo "PIPELINE ORCHESTRATION - SEQUENTIAL JOB EXECUTION"
+            echo "============================================================"
+            echo ""
+
+            # Step 1: Wait for historical fetch jobs (optional - may not exist)
+            echo "Step 1/3: Checking for historical fetch jobs..."
+            if kubectl get job fetch-historical-2021 -n $ns &>/dev/null; then
+              echo "  Historical fetch jobs found. Waiting for completion..."
+              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2021 --timeout=7200s
+              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2022 --timeout=7200s
+              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2023 --timeout=7200s
+              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2024 --timeout=7200s
+              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2025 --timeout=7200s
+              echo "  ✓ Historical data fetch completed"
+            else
+              echo "  ⊘ Historical fetch jobs not found (skipping)"
+            fi
+            echo ""
+
+            # Step 2: Wait for weather hourly table (blocks until complete)
+            echo "Step 2/3: Waiting for weather_area_hourly table..."
+            kubectl wait -n $ns --for=condition=complete job/create-weather-hourly-table --timeout=7200s
+            echo "✓ Weather hourly table created"
+            echo ""
+
+            # Step 3: Only AFTER weather table is ready, start model training
+            echo "Step 3/3: Starting model training job..."
+            # Delete old training job if it exists and is not complete
+            if kubectl get job train-ml-model -n $ns &>/dev/null; then
+              status=$(kubectl get job train-ml-model -n $ns -o jsonpath='{.status.succeeded}')
+              if [ "$status" != "1" ]; then
+                echo "  Deleting incomplete/old training job..."
+                kubectl delete job train-ml-model -n $ns --ignore-not-found=true
+                sleep 5
+              fi
+            fi
+
+            # Create training job if it doesn't exist
+            if ! kubectl get job train-ml-model -n $ns &>/dev/null; then
+              echo "  Creating training job..."
+              kubectl apply -f /config/train-model-job.yaml
+            fi
+
+            echo "  Waiting for model training to complete..."
+            kubectl wait -n $ns --for=condition=complete job/train-ml-model --timeout=7200s
+            echo "✓ Model training completed"
+            echo ""
+
+            echo "============================================================"
+            echo "✓ ALL PREREQUISITES COMPLETED - STARTING SERVICE"
+            echo "============================================================"
+        volumeMounts:
+        - name: job-configs
+          mountPath: /config
+
       containers:
       - name: service
         image: eclipse-temurin:17-jre
@@ -30,9 +97,9 @@ spec:
         - name: OUTPUT_TOPIC
           value: "energy_predictions"
         - name: CONSUMPTION_MODEL_PATH
-          value: "/app/SparkML/models/energy_consumption_model_20251229_173121"
+          value: "hdfs://namenode:9000/user/hive/warehouse/models"
         - name: CHECK_INTERVAL
-          value: "600"  # 10 minutes
+          value: "600"
         - name: JAVA_HOME
           value: "/opt/java/openjdk"
         volumeMounts:
@@ -42,4 +109,7 @@ spec:
       - name: code
         persistentVolumeClaim:
           claimName: weather-data-pvc
+      - name: job-configs
+        configMap:
+          name: pipeline-job-configs
       restartPolicy: Always
