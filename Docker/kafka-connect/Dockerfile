@@ -29,4 +29,5 @@ RUN echo 'Installing plugins...' && \
     rm -rf /tmp/jdbc* /tmp/hdfs* && \
     echo 'Plugins installed successfully!'
 
+
 USER appuser

@@ -12,7 +12,7 @@ data:
     CREATE TABLE IF NOT EXISTS measurements (
       time        TIMESTAMPTZ NOT NULL,
       value       DOUBLE PRECISION NOT NULL,
-      type        VARCHAR(20) NOT NULL,
+      type        TEXT NOT NULL,
       metadata    JSONB DEFAULT '{}',
       UNIQUE(time, type)  -- Required for ON CONFLICT in database writer
     );

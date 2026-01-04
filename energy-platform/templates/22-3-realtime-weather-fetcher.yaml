@@ -1,38 +1,53 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: realtime-weather-fetcher
+  name: realtime-fetcher
   namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: realtime-weather-fetcher
+      app: realtime-fetcher
   template:
     metadata:
       labels:
-        app: realtime-weather-fetcher
+        app: realtime-fetcher
     spec:
       containers:
       - name: fetcher
         image: dummystad/bigdata:fetcher-latest
-        imagePullPolicy: Always
+        imagePullPolicy: Always # Force pull to get latest changes
         command: ["/bin/bash", "-c"]
         args:
           - |
             set -e
             echo "Starting real-time weather fetcher..."
-            python3 /app/scripts/fetch_realtime_weather.py
+            cd /app/scripts
+            python3 -u fetch_realtime_weather.py &
+
+            echo "Starting real-time energy fetcher..."
+            python3 -u fetch_realtime_energy.py &
+
+            wait
         env:
-        - name: DMI_API_KEY
-          value: "b5800a05-4f0f-4584-b130-6129213728c0"
         - name: KAFKA_BOOTSTRAP_SERVERS
           value: "{{ .Release.Name }}-energy-cluster:9092"
         - name: SCHEMA_REGISTRY_URL
           value: "http://schema-registry:8081"
-        # Updated to match Anders configuration and likely Spark expectations
         - name: KAFKA_TOPIC
           value: "weather_raw_avro"
+        - name: ENERGY_KAFKA_TOPIC
+          value: "energy_actual"
         - name: FETCH_INTERVAL
-          value: "600"  # 10 minutes
-      restartPolicy: Always
+          value: "300"
+        - name: ENERGY_FETCH_INTERVAL
+          value: "3600"
+        - name: DMI_API_KEY
+          value: "b5800a05-4f0f-4584-b130-6129213728c0"
+        volumeMounts:
+        - name: data-volume
+          mountPath: /data
+      volumes:
+      - name: data-volume
+        persistentVolumeClaim:
+          claimName: weather-data-pvc # Updated to match existing PVC

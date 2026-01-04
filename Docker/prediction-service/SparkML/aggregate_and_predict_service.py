@@ -19,56 +19,12 @@ from pyspark.sql.types import StringType
 from pyspark.sql.functions import udf
 import pyspark.sql.functions as F
 
-def find_latest_model(base_dir):
-    """
-    Find the most recent model in the given directory.
-    Priority:
-    1. 'consumption_model' (standard output from training)
-    2. Newest directory matching 'energy_model*' or 'consumption*'
-    """
-    if not os.path.exists(base_dir):
-        return None
-        
-    # 1. Check for standard fixed name
-    std_path = os.path.join(base_dir, "consumption_model")
-    if os.path.exists(std_path):
-        return std_path
-        
-    # 2. Search for timestamped/other models
-    candidates = []
-    try:
-        for name in os.listdir(base_dir):
-            full_path = os.path.join(base_dir, name)
-            if os.path.isdir(full_path):
-                if "consumption" in name or "energy_model" in name:
-                    candidates.append(full_path)
-    except Exception as e:
-        print(f"Warning: Error scanning models directory: {e}")
-        return None
-    
-    if candidates:
-        # Return the most recently modified
-        return max(candidates, key=os.path.getmtime)
-        
-    return None
-
 # Configuration
-KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
+KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "energy-platform-energy-cluster:9092")
 OUTPUT_TOPIC = os.getenv("OUTPUT_TOPIC", "energy_predictions")
+# Updated default path to match where Training Job saves the "latest" model
+CONSUMPTION_MODEL_PATH = os.getenv("CONSUMPTION_MODEL_PATH", "/data/SparkML/models/energy_model_consumption")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "600"))  # 10 minutes
-
-# Model Path Resolution
-env_model_path = os.getenv("CONSUMPTION_MODEL_PATH")
-if env_model_path:
-    CONSUMPTION_MODEL_PATH = env_model_path
-else:
-    # Try to find in ./models
-    found_path = find_latest_model("./models")
-    if found_path:
-        CONSUMPTION_MODEL_PATH = found_path
-    else:
-        # Fallback to the baked-in default if nothing found
-        CONSUMPTION_MODEL_PATH = "./models/energy_model_consumption_20251227_235915"
 
 print(f"""
 {'='*70}
@@ -133,39 +89,16 @@ def station_to_dk_area(station_id):
 
 station_to_dk_area_udf = udf(station_to_dk_area, StringType())
 
-# Global model variable
-consumption_model = None
-last_model_load_time = 0
-
-def load_model():
-    """Load or reload the consumption model"""
-    global consumption_model, last_model_load_time, CONSUMPTION_MODEL_PATH
-    
-    # Check if we need to reload (e.g. every hour or if not loaded)
-    # For simplicity, we'll just load it if it's None, or we could add a timestamp check
-    # But since the path might change if we use dynamic finding, let's re-resolve path
-    
-    current_path = CONSUMPTION_MODEL_PATH
-    
-    # If using dynamic finding (no env var set), re-scan
-    if not os.getenv("CONSUMPTION_MODEL_PATH"):
-        found = find_latest_model("./models")
-        if found:
-            current_path = found
-            
-    print(f"Loading consumption model from {current_path}...")
-    try:
-        consumption_model = PipelineModel.load(current_path)
-        print("✓ Consumption model loaded\n")
-        last_model_load_time = time.time()
-        return True
-    except Exception as e:
-        print(f"✗ Failed to load model: {e}")
-        return False
-
-# Initial load
-if not load_model():
-    print("Warning: Could not load initial model. Will retry in loop.")
+# Load consumption model
+print("Loading consumption model...")
+try:
+    consumption_model = PipelineModel.load(CONSUMPTION_MODEL_PATH)
+    print("✓ Consumption model loaded\n")
+except Exception as e:
+    print(f"✗ Failed to load model: {e}")
+    # We don't exit here to allow the service to keep running and retrying aggregation
+    # But we won't be able to predict until model is loaded
+    consumption_model = None
 
 # Initialize Kafka producer
 print("Connecting to Kafka...")
@@ -196,15 +129,22 @@ def aggregate_latest_10min():
         raw_df = spark.sql("SELECT * FROM weather_raw_avro")
 
         # Get latest observed timestamp
-        latest_observed = raw_df.select(spark_max(col("observed")).alias("latest")).collect()[0]["latest"]
+        latest_observed = raw_df.select(spark_max(col("timeObserved")).alias("latest")).collect()[0]["latest"]
 
         if not latest_observed:
             print("  ⚠️  No observations found")
             return False
 
         # Parse the latest observation timestamp
+        # Format from Connect is likely ISO8601 string
         from datetime import datetime as dt
-        latest_dt = dt.strptime(latest_observed, "%Y-%m-%dT%H:%M:%SZ")
+        # Handle potential Z at end or not
+        latest_observed_clean = latest_observed.replace('Z', '')
+        try:
+            latest_dt = dt.fromisoformat(latest_observed_clean)
+        except ValueError:
+             # Fallback for other formats
+             latest_dt = dt.strptime(latest_observed_clean, "%Y-%m-%dT%H:%M:%S")
 
         # Calculate current 10-minute bucket
         current_bucket = (latest_dt.minute // 10) * 10
@@ -239,21 +179,22 @@ def aggregate_latest_10min():
         # Filter observations for this specific 10-minute bucket
         # Calculate end time for the bucket (handle hour rollover)
         bucket_end_dt = bucket_dt + timedelta(minutes=10)
-        bucket_end_str = bucket_end_dt.strftime("%Y-%m-%dT%H:%M:00Z")
-        bucket_start_str = bucket_dt.strftime("%Y-%m-%dT%H:%M:00Z")
+        bucket_end_str = bucket_end_dt.isoformat()
+        bucket_start_str = bucket_dt.isoformat()
 
+        # Note: String comparison works for ISO timestamps
         bucket_df = raw_df.filter(
-            (col("observed") >= bucket_start_str) &
-            (col("observed") < bucket_end_str)
+            (col("timeObserved") >= bucket_start_str) &
+            (col("timeObserved") < bucket_end_str)
         ) \
-            .withColumn("observed_ts", to_timestamp(col("observed"), "yyyy-MM-dd'T'HH:mm:ss'Z'")) \
+            .withColumn("observed_ts", to_timestamp(col("timeObserved"))) \
             .withColumn("year", pyspark_year(col("observed_ts"))) \
             .withColumn("month", pyspark_month(col("observed_ts"))) \
             .withColumn("day", dayofmonth(col("observed_ts"))) \
             .withColumn("hour", pyspark_hour(col("observed_ts"))) \
             .withColumn("minute", F.minute(col("observed_ts"))) \
             .withColumn("minute_bucket", (F.col("minute") / 10).cast("int") * 10) \
-            .select("station_id", "parameter_id", "value", "year", "month", "day", "hour", "minute_bucket")
+            .select("stationId", "parameterId", "value", "year", "month", "day", "hour", "minute_bucket")
 
         obs_count = bucket_df.count()
         print(f"  ✓ Found {obs_count:,} observations")
@@ -262,12 +203,12 @@ def aggregate_latest_10min():
             return False
 
         # Pivot to wide format
-        wide_df = bucket_df.groupBy("station_id", "year", "month", "day", "hour", "minute_bucket") \
-            .pivot("parameter_id") \
+        wide_df = bucket_df.groupBy("stationId", "year", "month", "day", "hour", "minute_bucket") \
+            .pivot("parameterId") \
             .avg("value")
 
         # Add DK area
-        wide_df = wide_df.withColumn("dk_area", station_to_dk_area_udf(col("station_id")))
+        wide_df = wide_df.withColumn("dk_area", station_to_dk_area_udf(col("stationId")))
         wide_df = wide_df.filter(col("dk_area") != "UNKNOWN")
 
         # Safe aggregation helpers
@@ -336,13 +277,17 @@ def make_predictions():
     """
     global consumption_model
     
-    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Making predictions...")
-
-    # Ensure model is loaded
+    # Try to load model if not loaded
     if consumption_model is None:
-        if not load_model():
+        try:
+            print("  Attempting to load model...")
+            consumption_model = PipelineModel.load(CONSUMPTION_MODEL_PATH)
+            print("  ✓ Model loaded")
+        except Exception:
             print("  ⏭️  Skipping predictions (no model loaded)")
             return
+
+    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Making predictions...")
 
     try:
         # Get weather data that hasn't been predicted yet (not in predicted_buckets table)
@@ -485,11 +430,6 @@ def main():
         print(f"{'='*70}")
 
         try:
-            # Check if we should reload model (e.g. every 6 iterations = 1 hour)
-            if iteration % 6 == 0:
-                print("Checking for updated model...")
-                load_model()
-
             # Step 1: Aggregate new weather data (10-minute buckets)
             new_data_aggregated = aggregate_latest_10min()
 

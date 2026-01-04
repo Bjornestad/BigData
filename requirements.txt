@@ -5,3 +5,13 @@ pyyaml
 kafka-python
 python-dotenv
 tqdm
+confluent-kafka[schema-registry]
+authlib
+jsonschema
+fastavro
+attrs
+httpx
+pytest
+pyspark
+mock
+psycopg2-binary

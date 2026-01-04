@@ -29,7 +29,7 @@ spec:
             # Delete existing connectors if they exist
             echo ""
             echo "Cleaning up old connectors..."
-            for connector in hdfs-sink-weather-ml hdfs-sink-energy-actual hdfs-sink-energy-predictions; do
+            for connector in hdfs-sink-weather-raw-avro hdfs-sink-energy-consumption-raw hdfs-sink-energy-predictions; do
               if curl -s $CONNECT_URL/connectors | grep -q "\"$connector\""; then
                 echo "  Deleting $connector..."
                 curl -X DELETE $CONNECT_URL/connectors/$connector
@@ -38,58 +38,79 @@ spec:
 
             echo ""
             echo "================================================================"
-            echo "CREATING HDFS SINK #1: weather_raw_avro (PARQUET)"
+            echo "CREATING HDFS SINK #1: weather_raw_avro (PARQUET ONLY)"
             echo "================================================================"
 
+            # Note: hive.integration is FALSE because we create tables manually in create-historical-hive-tables job
+            # This avoids dependency hell with HCatalog JARs in Kafka Connect
             curl -X POST $CONNECT_URL/connectors \
               -H "Content-Type: application/json" \
               -d '{
-              "name": "hdfs-sink-weather-ml",
+              "name": "hdfs-sink-weather-raw-avro",
               "config": {
                 "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
+                "topics.dir": "/user/hive/warehouse",
+                "flush.size": "5",
                 "tasks.max": "1",
-                "topics": "weather_raw_avro",
-                "hdfs.url": "hdfs://namenode:9000",
-                "topics.dir": "/user/hive/warehouse/weather_wind_solar_area_hourly",
-                "flush.size": "10",
+                "timezone": "UTC",
+                "hive.database": "default",
                 "rotate.interval.ms": "60000",
+                "hive.partition.field.name": "year,month,day",
+                "locale": "en-US",
+                "logs.dir": "/tmp/logs",
                 "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
-                "parquet.codec": "snappy",
-                "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
-                "schema.compatibility": "NONE",
+                "hive.integration": "false",
                 "value.converter": "io.confluent.connect.avro.AvroConverter",
-                "value.converter.schema.registry.url": "http://schema-registry:8081",
+                "errors.log.enable": "true",
                 "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+                "partition.duration.ms": "86400000",
+                "schema.compatibility": "BACKWARD",
+                "topics": "weather_raw_avro",
+                "parquet.codec": "snappy",
+                "hdfs.url": "hdfs://namenode:9000",
+                "value.converter.schema.registry.url": "http://schema-registry:8081",
+                "consumer.override.auto.offset.reset": "latest",
+                "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
+                "name": "hdfs-sink-weather-raw-avro",
                 "errors.tolerance": "all",
-                "errors.log.enable": "true"
+                "path.format": "'\''year'\''=YYYY/'\''month'\''=MM/'\''day'\''=dd",
+                "timestamp.extractor": "Wallclock"
               }
             }'
 
             echo ""
             echo ""
             echo "================================================================"
-            echo "CREATING HDFS SINK #2: energy_actual (PARQUET)"
+            echo "CREATING HDFS SINK #2: energy_actual (PARQUET ONLY)"
             echo "================================================================"
 
             curl -X POST $CONNECT_URL/connectors \
               -H "Content-Type: application/json" \
               -d '{
-              "name": "hdfs-sink-energy-actual",
+              "name": "hdfs-sink-energy-consumption-raw",
               "config": {
                 "connector.class": "io.confluent.connect.hdfs.HdfsSinkConnector",
                 "tasks.max": "1",
                 "topics": "energy_actual",
                 "hdfs.url": "hdfs://namenode:9000",
-                "topics.dir": "/user/hive/warehouse/energy_actual_realtime",
                 "flush.size": "10",
-                "rotate.interval.ms": "60000",
+                "rotate.interval.ms": "3600000",
+                "topics.dir": "/user/hive/warehouse/consumption_raw",
+                "logs.dir": "/tmp/logs",
                 "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
                 "parquet.codec": "snappy",
-                "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
-                "schema.compatibility": "NONE",
+                "partitioner.class": "io.confluent.connect.storage.partitioner.TimeBasedPartitioner",
+                "path.format": "'\''year'\''=YYYY/'\''month'\''=MM",
+                "partition.duration.ms": "2678400000",
+                "locale": "en-US",
+                "timezone": "UTC",
+                "timestamp.extractor": "Wallclock",
+                "hive.integration": "false",
+                "schema.compatibility": "BACKWARD",
                 "value.converter": "io.confluent.connect.avro.AvroConverter",
                 "value.converter.schema.registry.url": "http://schema-registry:8081",
                 "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+                "consumer.override.auto.offset.reset": "latest",
                 "errors.tolerance": "all",
                 "errors.log.enable": "true"
               }
@@ -98,7 +119,7 @@ spec:
             echo ""
             echo ""
             echo "================================================================"
-            echo "CREATING HDFS SINK #3: energy_predictions (PARQUET)"
+            echo "CREATING HDFS SINK #3: energy_predictions (JSON)"
             echo "================================================================"
 
             curl -X POST $CONNECT_URL/connectors \
@@ -113,15 +134,12 @@ spec:
                 "topics.dir": "/user/hive/warehouse/energy_predictions_realtime",
                 "flush.size": "10",
                 "rotate.interval.ms": "60000",
-                "format.class": "io.confluent.connect.hdfs.parquet.ParquetFormat",
-                "parquet.codec": "snappy",
+                "format.class": "io.confluent.connect.hdfs.json.JsonFormat",
                 "partitioner.class": "io.confluent.connect.storage.partitioner.DefaultPartitioner",
                 "schema.compatibility": "NONE",
-                "value.converter": "io.confluent.connect.avro.AvroConverter",
-                "value.converter.schema.registry.url": "http://schema-registry:8081",
-                "key.converter": "org.apache.kafka.connect.storage.StringConverter",
-                "errors.tolerance": "all",
-                "errors.log.enable": "true"
+                "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+                "value.converter.schemas.enable": "false",
+                "key.converter": "org.apache.kafka.connect.storage.StringConverter"
               }
             }'
 
@@ -131,7 +149,7 @@ spec:
             echo "VERIFYING CONNECTORS"
             echo "================================================================"
 
-            for connector in hdfs-sink-weather-ml hdfs-sink-energy-actual hdfs-sink-energy-predictions; do
+            for connector in hdfs-sink-weather-raw-avro hdfs-sink-energy-consumption-raw hdfs-sink-energy-predictions; do
               echo "Waiting for connector $connector to be ready..."
               until curl -s "$CONNECT_URL/connectors/$connector/status" | grep -q '"state":"RUNNING"'; do
                 echo "  Connector $connector not ready yet, waiting..."
@@ -145,20 +163,7 @@ spec:
             curl -s $CONNECT_URL/connectors
 
             echo ""
-            echo ""
-            for connector in hdfs-sink-weather-ml hdfs-sink-energy-actual hdfs-sink-energy-predictions; do
-              echo "Status of $connector:"
-              curl -s $CONNECT_URL/connectors/$connector/status
-              echo ""
-            done
-
-            echo ""
             echo "✓ HDFS sinks configured successfully!"
-            echo ""
-            echo "Data will flow:"
-            echo "  weather_raw_avro       → /user/hive/warehouse/weather_wind_solar_area_hourly/"
-            echo "  energy_actual          → /user/hive/warehouse/energy_actual_realtime/"
-            echo "  energy_predictions     → /user/hive/warehouse/energy_predictions_realtime/"
 
       restartPolicy: Never
   backoffLimit: 2

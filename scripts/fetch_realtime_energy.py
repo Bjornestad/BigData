@@ -1,42 +1,60 @@
 #!/usr/bin/env python3
 """
-Real-time Actual Energy Data Fetcher
-Fetches actual production and consumption data from Energinet API
-Sends to Kafka for frontend display and comparison with predictions
+Real-time Actual Energy Consumption Fetcher
+Fetches actual consumption data from Energinet API (ConsumptionCoverageLocationBased)
+Sends to Kafka for comparison with predictions
 """
 
 import os
 import sys
 import time
-import json
 import requests
 from datetime import datetime, timedelta
-import pandas as pd
-from kafka import KafkaProducer
-from kafka.errors import KafkaError
+from confluent_kafka import Producer
+from confluent_kafka.serialization import SerializationContext, MessageField
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroSerializer
 
 # Configuration
 ENERGINET_API_URL = "https://api.energidataservice.dk/dataset"
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-bootstrap:9092")
-KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "energy_actual")
-FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "600"))  # 10 minutes default
+SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL", "http://kafka-schema-registry:8081")
+KAFKA_TOPIC = os.getenv("ENERGY_KAFKA_TOPIC", "energy_actual")  # Use separate env var
+FETCH_INTERVAL = int(os.getenv("ENERGY_FETCH_INTERVAL", "6000"))  # 60 minutes default
 
-# Kafka Producer
+# Avro Schema for raw energy consumption data (from ConsumptionCoverageLocationBased API)
+AVRO_SCHEMA = """{
+    "type": "record",
+    "name": "EnergyConsumptionRaw",
+    "namespace": "dk.energy",
+    "fields": [
+        {"name": "HourUTC", "type": "string"},
+        {"name": "HourDK", "type": "string"},
+        {"name": "PriceArea", "type": "string"},
+        {"name": "ConnectedArea", "type": "string"},
+        {"name": "ViaArea", "type": "string"},
+        {"name": "SharePPM", "type": ["null", "long"], "default": null},
+        {"name": "ShareMWh", "type": ["null", "double"], "default": null},
+        {"name": "Updated", "type": "string"}
+    ]
+}"""
+
+# Global producer and serializer
 producer = None
+avro_serializer = None
 
-def fetch_production_actual(days_back=3):
-    """Fetch actual production data from Energinet (3 days back due to data delay)"""
-    end_time = datetime.utcnow() - timedelta(days=days_back)
-    start_time = end_time - timedelta(hours=24)
+def fetch_consumption_actual(hours_back=24):
+    """Fetch actual consumption data from Energinet (real-time, no delay)"""
+    end_time = datetime.now()
+    start_time = end_time - timedelta(hours=hours_back)
 
-    # Production by municipality
-    url = f"{ENERGINET_API_URL}/ProductionConsumptionSettlement"
+    # Location-based consumption coverage (hourly by area)
+    url = f"{ENERGINET_API_URL}/ConsumptionCoverageLocationBased"
     params = {
-        'start': start_time.strftime('%Y-%m-%dT%H:00'),
-        'end': end_time.strftime('%Y-%m-%dT%H:00'),
-        'filter': '{"MunicipalityNo":{"$ne":null}}',
-        'sort': 'HourUTC DESC',
-        'limit': 10000
+        'start': start_time.strftime('%Y-%m-%dT%H:%M'),
+        'end': end_time.strftime('%Y-%m-%dT%H:%M'),
+        'limit': 0,  # No limit - fetch all
+        'sort': 'HourDK'
     }
 
     try:
@@ -46,184 +64,110 @@ def fetch_production_actual(days_back=3):
         records = data.get('records', [])
 
         if records:
-            df = pd.DataFrame(records)
-            return df
-        return None
-    except Exception as e:
-        print(f"  ✗ Error fetching production data: {e}")
-        return None
-
-def fetch_consumption_actual(days_back=3):
-    """Fetch actual consumption data from Energinet (3 days back due to data delay)"""
-    end_time = datetime.utcnow() - timedelta(days=days_back)
-    start_time = end_time - timedelta(hours=24)
-
-    url = f"{ENERGINET_API_URL}/ConsumptionDE35Hour"
-    params = {
-        'start': start_time.strftime('%Y-%m-%dT%H:00'),
-        'end': end_time.strftime('%Y-%m-%dT%H:00'),
-        'sort': 'HourUTC DESC',
-        'limit': 1000
-    }
-
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        records = data.get('records', [])
-
-        if records:
-            df = pd.DataFrame(records)
-            return df
-        return None
+            return records
+        return []
     except Exception as e:
         print(f"  ✗ Error fetching consumption data: {e}")
-        return None
-
-def aggregate_production_by_area(df):
-    """Aggregate production data by DK area and hour"""
-    if df is None or df.empty:
         return []
 
-    # Parse timestamp and extract components
-    df['HourDK'] = pd.to_datetime(df['HourDK'])
-    df['year'] = df['HourDK'].dt.year
-    df['month'] = df['HourDK'].dt.month
-    df['day'] = df['HourDK'].dt.day
-    df['hour'] = df['HourDK'].dt.hour
-
-    # Map municipality to DK area (municipality < 400 = DK1, >= 400 = DK2)
-    df['MunicipalityNo'] = pd.to_numeric(df['MunicipalityNo'], errors='coerce')
-    df['dk_area'] = df['MunicipalityNo'].apply(lambda x: 'DK1' if x < 400 else 'DK2')
-
-    # Calculate total production
-    production_cols = ['SolarMWh', 'OffshoreWindLt100MW_MWh', 'OffshoreWindGe100MW_MWh',
-                      'OnshoreWindMWh', 'ThermalPowerMWh']
-
-    for col in production_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-
-    df['total_production_mwh'] = sum(df[col] for col in production_cols if col in df.columns)
-
-    # Group by area and hour
-    grouped = df.groupby(['dk_area', 'year', 'month', 'day', 'hour']).agg({
-        'total_production_mwh': 'sum',
-        'SolarMWh': 'sum',
-        'OnshoreWindMWh': 'sum',
-        'OffshoreWindLt100MW_MWh': 'sum',
-        'OffshoreWindGe100MW_MWh': 'sum'
-    }).reset_index()
-
-    return grouped.to_dict('records')
-
-def aggregate_consumption_by_area(df):
-    """Aggregate consumption data by DK area and hour"""
-    if df is None or df.empty:
+def process_raw_records(records):
+    """Process raw records to ensure correct types for Avro schema"""
+    if not records:
         return []
 
-    # Parse timestamp
-    df['HourDK'] = pd.to_datetime(df['HourDK'])
-    df['year'] = df['HourDK'].dt.year
-    df['month'] = df['HourDK'].dt.month
-    df['day'] = df['HourDK'].dt.day
-    df['hour'] = df['HourDK'].dt.hour
+    processed = []
+    for record in records:
+        # Ensure all fields are present and have correct types
+        processed_record = {
+            'HourUTC': str(record.get('HourUTC', '')),
+            'HourDK': str(record.get('HourDK', '')),
+            'PriceArea': str(record.get('PriceArea', '')),
+            'ConnectedArea': str(record.get('ConnectedArea', '')),
+            'ViaArea': str(record.get('ViaArea', '')),
+            'SharePPM': int(record['SharePPM']) if record.get('SharePPM') is not None else None,
+            'ShareMWh': float(record['ShareMWh']) if record.get('ShareMWh') is not None else None,
+            'Updated': str(record.get('Updated', ''))
+        }
+        processed.append(processed_record)
 
-    # Consumption is already by price area (DK1/DK2)
-    df['dk_area'] = df['PriceArea']
-    df['ConsumptionMWh'] = pd.to_numeric(df['ConsumptionMWh'], errors='coerce').fillna(0)
+    return processed
 
-    # Group by area and hour
-    grouped = df.groupby(['dk_area', 'year', 'month', 'day', 'hour']).agg({
-        'ConsumptionMWh': 'sum'
-    }).reset_index()
-
-    grouped.rename(columns={'ConsumptionMWh': 'total_consumption_mwh'}, inplace=True)
-
-    return grouped.to_dict('records')
-
-def combine_production_consumption(prod_records, cons_records):
-    """Combine production and consumption into unified records"""
-    # Convert to DataFrames for easier merging
-    if not prod_records and not cons_records:
-        return []
-
-    prod_df = pd.DataFrame(prod_records) if prod_records else pd.DataFrame()
-    cons_df = pd.DataFrame(cons_records) if cons_records else pd.DataFrame()
-
-    # Merge on dk_area, year, month, day, hour
-    if not prod_df.empty and not cons_df.empty:
-        merged = pd.merge(
-            prod_df, cons_df,
-            on=['dk_area', 'year', 'month', 'day', 'hour'],
-            how='outer'
-        )
-    elif not prod_df.empty:
-        merged = prod_df
-        merged['total_consumption_mwh'] = None
-    elif not cons_df.empty:
-        merged = cons_df
-        merged['total_production_mwh'] = None
-    else:
-        return []
-
-    # Fill NaN values
-    merged = merged.fillna({
-        'total_production_mwh': 0,
-        'total_consumption_mwh': 0,
-        'SolarMWh': 0,
-        'OnshoreWindMWh': 0,
-        'OffshoreWindLt100MW_MWh': 0,
-        'OffshoreWindGe100MW_MWh': 0
-    })
-
-    # Convert to int where appropriate
-    for col in ['year', 'month', 'day', 'hour']:
-        merged[col] = merged[col].astype(int)
-
-    # Add timestamp
-    merged['timestamp'] = datetime.utcnow().isoformat()
-
-    # Calculate net balance
-    merged['net_balance_mwh'] = merged['total_production_mwh'] - merged['total_consumption_mwh']
-
-    return merged.to_dict('records')
+def dict_to_energy_actual(obj, _ctx):
+    """Convert dictionary to Avro-compatible format"""
+    return obj
 
 def send_to_kafka(records):
-    """Send actual energy records to Kafka"""
-    global producer
+    """Send actual energy records to Kafka using Avro with Schema Registry"""
+    global producer, avro_serializer
 
     if not records:
         return False
 
     if producer is None:
         try:
-            producer = KafkaProducer(
-                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                value_serializer=lambda v: json.dumps(v, default=str).encode('utf-8'),
-                key_serializer=lambda k: k.encode('utf-8') if k else None
+            # Initialize Schema Registry client
+            schema_registry_conf = {'url': SCHEMA_REGISTRY_URL}
+            schema_registry_client = SchemaRegistryClient(schema_registry_conf)
+
+            # Initialize Avro serializer
+            avro_serializer = AvroSerializer(
+                schema_registry_client,
+                AVRO_SCHEMA,
+                dict_to_energy_actual
             )
+
+            # Initialize Kafka producer
+            producer_conf = {
+                'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
+                'client.id': 'energy-fetcher'
+            }
+            producer = Producer(producer_conf)
+
             print(f"  ✓ Connected to Kafka at {KAFKA_BOOTSTRAP_SERVERS}")
+            print(f"  ✓ Connected to Schema Registry at {SCHEMA_REGISTRY_URL}")
+            print(f"  ✓ Using Avro serialization")
         except Exception as e:
-            print(f"  ✗ Failed to connect to Kafka: {e}")
+            print(f"  ✗ Failed to initialize Kafka/Schema Registry: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     try:
+        sent_count = 0
         for record in records:
-            key = f"{record['dk_area']}_{record['year']}_{record['month']}_{record['day']}_{record['hour']}"
-            future = producer.send(KAFKA_TOPIC, key=key, value=record)
-            future.get(timeout=10)
+            # Use HourDK and PriceArea as key
+            key = f"{record['PriceArea']}_{record['HourDK']}"
+
+            # Serialize the record to Avro
+            serialized_value = avro_serializer(
+                record,
+                SerializationContext(KAFKA_TOPIC, MessageField.VALUE)
+            )
+
+            # Send to Kafka
+            producer.produce(
+                topic=KAFKA_TOPIC,
+                key=key.encode('utf-8'),
+                value=serialized_value
+            )
+            sent_count += 1
 
         producer.flush()
-        print(f"  ✓ Sent {len(records)} actual energy records to Kafka topic '{KAFKA_TOPIC}'")
-        for r in records:
-            print(f"    - {r['dk_area']} {r['year']}-{r['month']:02d}-{r['day']:02d} {r['hour']:02d}:00 | "
-                  f"Prod: {r['total_production_mwh']:,.0f} MWh | "
-                  f"Cons: {r['total_consumption_mwh']:,.0f} MWh | "
-                  f"Net: {r['net_balance_mwh']:+,.0f} MWh")
+        print(f"  ✓ Sent {sent_count} Avro records to Kafka topic '{KAFKA_TOPIC}'")
+
+        # Show sample records
+        for r in records[:5]:
+            share_mwh = r.get('ShareMWh', 0)
+            share_mwh_str = f"{share_mwh:,.2f}" if share_mwh is not None else "null"
+            print(f"    - {r['PriceArea']} → {r['ConnectedArea']} via {r['ViaArea']} | "
+                  f"{r['HourDK']} | ShareMWh: {share_mwh_str}")
+        if len(records) > 5:
+            print(f"    ... and {len(records) - 5} more records")
         return True
     except Exception as e:
         print(f"  ✗ Error sending to Kafka: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 def main():
@@ -231,7 +175,7 @@ def main():
     print(f"⚡ Real-time Actual Energy Data Fetcher")
     print(f"   Kafka Topic: {KAFKA_TOPIC}")
     print(f"   Fetch Interval: {FETCH_INTERVAL}s ({FETCH_INTERVAL/3600:.1f}h)")
-    print(f"   Data Delay: 3 days (Energinet reporting lag)")
+    print(f"   API: New Energinet API (real-time data)")
     print(f"{'='*70}\n")
 
     iteration = 0
@@ -239,26 +183,17 @@ def main():
         iteration += 1
         print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Iteration {iteration}")
 
-        # Fetch production data (3 days back due to Energinet data delay)
-        print("  Fetching production data from Energinet (3 days back)...")
-        prod_df = fetch_production_actual(days_back=3)
+        # Fetch consumption data (real-time, no delay)
+        print("  Fetching consumption data from Energinet (real-time)...")
+        raw_records = fetch_consumption_actual(hours_back=24)
+        print(f"  Fetched: {len(raw_records)} raw consumption records")
 
-        # Fetch consumption data (3 days back due to Energinet data delay)
-        print("  Fetching consumption data from Energinet (3 days back)...")
-        cons_df = fetch_consumption_actual(days_back=3)
+        # Process raw records to match Avro schema
+        processed_records = process_raw_records(raw_records)
 
-        # Aggregate by DK area
-        prod_records = aggregate_production_by_area(prod_df) if prod_df is not None else []
-        cons_records = aggregate_consumption_by_area(cons_df) if cons_df is not None else []
-
-        print(f"  Aggregated: {len(prod_records)} production records, {len(cons_records)} consumption records")
-
-        # Combine production and consumption
-        combined_records = combine_production_consumption(prod_records, cons_records)
-
-        if combined_records:
-            print(f"  Combined: {len(combined_records)} unified records")
-            send_to_kafka(combined_records)
+        if processed_records:
+            print(f"  Processed: {len(processed_records)} records")
+            send_to_kafka(processed_records)
         else:
             print(f"  ✗ No data available")
 

@@ -30,15 +30,44 @@ function App() {
   
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const isRealtimeRef = useRef(true); // Track mode to prevent WS from overwriting history
 
-  const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'ws://localhost:8080';
-  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8080';
+  // Dynamic URL generation for Kubernetes deployment
+  const getBackendUrls = () => {
+    const hostname = window.location.hostname;
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const httpProtocol = window.location.protocol;
+    
+    // If running in Kubernetes (not localhost), use ingress paths
+    if (hostname !== 'localhost' && hostname !== '127.0.0.1') {
+      return {
+        wsUrl: `${protocol}://${hostname}/ws`,
+        apiUrl: `${httpProtocol}//${hostname}/api`
+      };
+    }
+    
+    // Local development fallback
+    return {
+      wsUrl: process.env.REACT_APP_BACKEND_URL || 'ws://localhost:8080',
+      apiUrl: process.env.REACT_APP_API_URL || 'http://localhost:8080'
+    };
+  };
+
+  const { wsUrl: BACKEND_URL, apiUrl: API_URL } = getBackendUrls();
+  
+  console.log('Backend URLs:', { BACKEND_URL, API_URL });
 
   // Fetch historical data from database
   const fetchHistoricalData = useCallback(async (range, customStart = null, customEnd = null) => {
     setLoading(true);
     setDataSource('historical');
-    
+    isRealtimeRef.current = false; // Ensure WS ignores updates
+
+    // Close WS if open
+    if (wsRef.current) {
+        wsRef.current.close();
+    }
+
     try {
       let startTime, endTime;
       
@@ -108,6 +137,9 @@ function App() {
 
   // Connect to WebSocket for real-time data
   const connectWebSocket = useCallback(() => {
+    // Don't connect if we are in historical mode
+    if (!isRealtimeRef.current) return;
+
     try {
       const ws = new WebSocket(BACKEND_URL);
       wsRef.current = ws;
@@ -122,7 +154,11 @@ function App() {
       };
 
       ws.onmessage = (event) => {
+        // Guard: Ignore messages if we switched to historical mode
+        if (!isRealtimeRef.current) return;
+
         const message = JSON.parse(event.data);
+        console.log('WebSocket Message Received:', message);
 
         if (message.type === 'initial') {
           const combined = {};
@@ -172,23 +208,32 @@ function App() {
 
       ws.onerror = (error) => {
         console.error('WebSocket error:', error);
-        setConnectionStatus('error');
+        if (isRealtimeRef.current) {
+            setConnectionStatus('error');
+        }
       };
 
       ws.onclose = () => {
         console.log('WebSocket disconnected');
-        setConnectionStatus('disconnected');
-        wsRef.current = null;
-        
-        reconnectTimeoutRef.current = setTimeout(() => {
-          console.log('Attempting to reconnect...');
-          setConnectionStatus('reconnecting');
-          connectWebSocket();
-        }, 3000);
+        if (isRealtimeRef.current) {
+            setConnectionStatus('disconnected');
+            wsRef.current = null;
+
+            reconnectTimeoutRef.current = setTimeout(() => {
+              console.log('Attempting to reconnect...');
+              setConnectionStatus('reconnecting');
+              connectWebSocket();
+            }, 3000);
+        } else {
+            // Clean close for historical mode
+            setConnectionStatus('offline');
+        }
       };
     } catch (error) {
       console.error('Error connecting to WebSocket:', error);
-      setConnectionStatus('error');
+      if (isRealtimeRef.current) {
+          setConnectionStatus('error');
+      }
     }
   }, [BACKEND_URL]);
 
@@ -197,6 +242,7 @@ function App() {
     setTimeRange(newRange);
     
     if (newRange === 'realtime') {
+      isRealtimeRef.current = true;
       if (wsRef.current && wsRef.current.readyState !== WebSocket.OPEN) {
         connectWebSocket();
       }
@@ -204,6 +250,7 @@ function App() {
     } else if (newRange === 'custom') {
       setShowCustomRangePicker(true);
     } else {
+      isRealtimeRef.current = false; // Disable realtime updates
       fetchHistoricalData(newRange);
     }
   };
@@ -229,7 +276,10 @@ function App() {
 
   useEffect(() => {
     if (timeRange === 'realtime') {
+      isRealtimeRef.current = true;
       connectWebSocket();
+    } else {
+      isRealtimeRef.current = false;
     }
 
     return () => {

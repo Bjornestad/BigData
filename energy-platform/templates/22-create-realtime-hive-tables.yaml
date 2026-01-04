@@ -1,7 +1,7 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: create-realtime-hive-tables
+  name: create-historical-hive-tables
   namespace: {{ .Release.Namespace }}
 spec:
   template:
@@ -25,13 +25,13 @@ spec:
             echo "Installing netcat..."
             apt-get update && apt-get install -y netcat-openbsd
 
-            echo "Creating Hive external tables for real-time data..."
+            echo "Creating Hive external tables for HISTORICAL data..."
 
             # Wait for Hive Metastore
             echo "Waiting for Hive Metastore..."
             until nc -z hive-metastore 9083; do
               echo "  Hive Metastore (hive-metastore:9083) not ready, waiting..."
-              sleep 10 # Increased wait time
+              sleep 10
             done
             echo "✓ Hive Metastore is ready"
 
@@ -42,25 +42,149 @@ spec:
             echo "================================================================"
 
             # Create SQL script
-            cat > /tmp/create_realtime_tables.sql << 'EOFHIVE'
-            CREATE EXTERNAL TABLE IF NOT EXISTS weather_wind_solar_area_hourly_realtime (
-              timestamp STRING, dk_area STRING, year INT, month INT, day INT, hour INT,
-              month_of_year INT, hour_of_day INT, wind_speed_avg DOUBLE, wind_speed_max DOUBLE,
-              wind_direction_sin DOUBLE, wind_direction_cos DOUBLE, solar_radiation_1h DOUBLE,
-              sunshine_duration_1h DOUBLE, cloud_cover_avg DOUBLE, temperature_avg DOUBLE,
-              humidity_avg DOUBLE, n_stations_wind INT, n_stations_solar INT
-            ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/weather_wind_solar_area_hourly';
+            cat > /tmp/create_historical_tables.sql << 'EOFHIVE'
 
-            CREATE EXTERNAL TABLE IF NOT EXISTS energy_actual_realtime (
-              timestamp STRING, dk_area STRING, year INT, month INT, day INT, hour INT,
-              total_production_mwh DOUBLE, total_consumption_mwh DOUBLE, net_balance_mwh DOUBLE,
-              SolarMWh DOUBLE, OnshoreWindMWh DOUBLE, OffshoreWindLt100MW_MWh DOUBLE, OffshoreWindGe100MW_MWh DOUBLE
-            ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/energy_actual_realtime';
+            -- Drop old tables to ensure schema update
+            DROP TABLE IF EXISTS weather_raw_historical;
+            DROP TABLE IF EXISTS energy_raw_historical;
+            DROP TABLE IF EXISTS weather_raw_avro;
+            DROP VIEW IF EXISTS weather_area_hourly_historical;
+            DROP VIEW IF EXISTS consumption_area_hourly;
 
-            CREATE EXTERNAL TABLE IF NOT EXISTS energy_predictions_realtime_raw (
-              timestamp STRING, dk_area STRING, year INT, month INT, day INT, hour INT,
-              weather STRING, predictions STRING
-            ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/energy_predictions_realtime';
+            -- 1. Raw Weather Data (from fetch-historical-weather job)
+            -- Location: /user/hive/warehouse/weather_observations_historical
+            -- Schema matches process_all_station_data in fetch_historical_weather.py
+            CREATE EXTERNAL TABLE weather_raw_historical (
+              stationId STRING,
+              parameterId STRING,
+              timeObserved STRING,
+              value DOUBLE,
+              year INT,
+              month INT
+            ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/weather_observations_historical';
+
+            -- 2. Raw Energy Data (from fetch-historical-energy job)
+            -- Location: /user/hive/warehouse/energy_actual
+            -- Schema matches process_batch_data in fetch_historical_energy.py
+            CREATE EXTERNAL TABLE energy_raw_historical (
+              HourUTC STRING,
+              HourDK STRING,
+              PriceArea STRING,
+              ConnectedArea STRING,
+              ViaArea STRING,
+              SharePPM DOUBLE,
+              ShareMWh DOUBLE,
+              Updated STRING,
+              year INT,
+              month INT
+            ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/energy_actual';
+
+            -- 3. Realtime Weather Data (from Kafka Connect)
+            -- This table is usually created by Kafka Connect, but we pre-create it to ensure Spark can see it
+            CREATE EXTERNAL TABLE weather_raw_avro (
+              stationId STRING,
+              parameterId STRING,
+              timeObserved STRING,
+              value DOUBLE
+            )
+            PARTITIONED BY (year INT, month INT, day INT)
+            STORED AS AVRO
+            LOCATION 'hdfs://namenode:9000/user/hive/warehouse/weather_raw_avro';
+
+            -- 4. Aggregated Views (to match what ML script expects)
+
+            -- View for Weather Aggregation (weather_area_hourly_historical)
+            -- Aggregates raw station data to DK area level
+            -- Note: We need to parse timeObserved string to timestamp
+            CREATE VIEW weather_area_hourly_historical AS
+            SELECT
+              CASE
+                WHEN stationId IN ('06186', '06180', '06190', '06135', '06138', '06141', '06151', '06156', '06159', '06168', '06169', '06170', '06181', '06183', '06187', '06188', '06193') THEN 'DK2'
+                ELSE 'DK1'
+              END as dk_area,
+              year, month,
+              day(to_timestamp(timeObserved)) as day,
+              hour(to_timestamp(timeObserved)) as hour,
+              AVG(CASE WHEN parameterId = 'temp_dry' THEN value END) as temp_mean_area,
+              MAX(CASE WHEN parameterId = 'temp_dry' THEN value END) as temp_max_area,
+              MIN(CASE WHEN parameterId = 'temp_dry' THEN value END) as temp_min_area,
+              AVG(CASE WHEN parameterId = 'wind_speed' THEN value END) as wind_speed_mean_area,
+              MAX(CASE WHEN parameterId = 'wind_max' THEN value END) as wind_speed_max_area,
+              AVG(CASE WHEN parameterId = 'humidity' THEN value END) as humidity_mean_area,
+              AVG(CASE WHEN parameterId = 'pressure' THEN value END) as pressure_at_sea_mean_area,
+              AVG(CASE WHEN parameterId = 'cloud_cover' THEN value END) as cloud_cover_mean_area,
+              AVG(CASE WHEN parameterId = 'visibility' THEN value END) as visibility_mean_area,
+              -- Placeholders for fields not in raw data but expected by ML script
+              CAST(NULL AS DOUBLE) as temp_grass_mean_area,
+              CAST(NULL AS DOUBLE) as temp_soil_mean_area,
+              CAST(NULL AS DOUBLE) as wind_dir_sin_area,
+              CAST(NULL AS DOUBLE) as wind_dir_cos_area,
+              CAST(NULL AS DOUBLE) as wind_gust_always_past1h_max_area,
+              CAST(NULL AS DOUBLE) as radia_glob_past1h_area,
+              CAST(NULL AS DOUBLE) as sun_last1h_glob_area,
+              CAST(NULL AS DOUBLE) as sun_last10min_glob_area,
+              CAST(NULL AS DOUBLE) as precip_past1h_mean_area,
+              CAST(NULL AS DOUBLE) as precip_past10min_mean_area,
+              COUNT(DISTINCT stationId) as n_stations
+            FROM weather_raw_historical
+            GROUP BY
+              CASE
+                WHEN stationId IN ('06186', '06180', '06190', '06135', '06138', '06141', '06151', '06156', '06159', '06168', '06169', '06170', '06181', '06183', '06187', '06188', '06193') THEN 'DK2'
+                ELSE 'DK1'
+              END,
+              year, month, day(to_timestamp(timeObserved)), hour(to_timestamp(timeObserved));
+
+            -- View for Energy Aggregation (consumption_area_hourly)
+            -- Aggregates raw municipality data to DK area level
+            -- Note: PriceArea is already DK1/DK2. We sum ShareMWh.
+            CREATE VIEW consumption_area_hourly AS
+            SELECT
+              PriceArea as dk_area,
+              year, month,
+              day(to_timestamp(HourDK)) as day,
+              hour(to_timestamp(HourDK)) as hour,
+              SUM(ShareMWh) as consumption_mwh_area
+            FROM energy_raw_historical
+            GROUP BY
+              PriceArea,
+              year, month, day(to_timestamp(HourDK)), hour(to_timestamp(HourDK));
+
+            -- Create table for tracking predictions (used by prediction service)
+            CREATE TABLE IF NOT EXISTS predicted_buckets (
+              dk_area STRING,
+              year INT,
+              month INT,
+              day INT,
+              hour INT,
+              minute_bucket INT,
+              predicted_at TIMESTAMP
+            ) STORED AS PARQUET;
+
+            -- Create table for 10-min weather aggregation (used by prediction service)
+            CREATE TABLE IF NOT EXISTS weather_area_10min (
+              dk_area STRING,
+              day INT,
+              hour INT,
+              minute_bucket INT,
+              temp_mean_area DOUBLE,
+              temp_max_area DOUBLE,
+              temp_min_area DOUBLE,
+              wind_speed_mean_area DOUBLE,
+              wind_speed_max_area DOUBLE,
+              wind_dir_sin_area DOUBLE,
+              wind_dir_cos_area DOUBLE,
+              sun_last10min_glob_area DOUBLE,
+              precip_past10min_mean_area DOUBLE,
+              humidity_mean_area DOUBLE,
+              pressure_at_sea_mean_area DOUBLE,
+              cloud_cover_mean_area DOUBLE,
+              visibility_mean_area DOUBLE,
+              n_stations INT,
+              predicted INT,
+              year INT,
+              month INT
+            ) STORED AS PARQUET;
+
             EOFHIVE
 
             # Execute via Spark SQL with retries
@@ -76,9 +200,9 @@ spec:
                 --master local[*] \
                 --conf spark.driver.extraJavaOptions="-Duser.home=/tmp -Divy.home=/tmp/.ivy2 -Duser.name=root" \
                 --conf spark.sql.warehouse.dir=hdfs://namenode:9000/user/hive/warehouse \
-                --conf hive.metastore.uris=thrift://hive-metastore.{{ .Release.Namespace }}.svc.cluster.local:9083 \
+                --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore.{{ .Release.Namespace }}.svc.cluster.local:9083 \
                 --conf spark.sql.catalogImplementation=hive \
-                -f /tmp/create_realtime_tables.sql; then
+                -f /tmp/create_historical_tables.sql; then
                 SUCCESS=true
                 echo "✓ Spark SQL executed successfully."
               else
@@ -97,10 +221,10 @@ spec:
             echo "VERIFYING TABLES..."
             spark-sql \
               --master local[*] \
-              --conf hive.metastore.uris=thrift://hive-metastore.{{ .Release.Namespace }}.svc.cluster.local:9083 \
+              --conf spark.hadoop.hive.metastore.uris=thrift://hive-metastore.{{ .Release.Namespace }}.svc.cluster.local:9083 \
               -e "SHOW TABLES;"
 
-            echo "✓ Real-time Hive tables created successfully (PARQUET)!"
+            echo "✓ Historical Hive tables created successfully!"
             echo "================================================================"
 
       restartPolicy: OnFailure

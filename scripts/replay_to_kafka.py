@@ -26,7 +26,7 @@ def wait_for_data():
         if os.path.exists(DATA_DIR):
             files = os.listdir(DATA_DIR)
             weather_files = [f for f in files if f.startswith("dmi_weather_") and f.endswith(".parquet")]
-            energy_files = [f for f in files if f.startswith("energy_production_") and f.endswith(".parquet")]
+            energy_files = [f for f in files if f.startswith("energy_data_") and f.endswith(".parquet")]
 
             if weather_files or energy_files:
                 print(f"Found {len(weather_files)} weather files and {len(energy_files)} energy files.")
@@ -110,7 +110,7 @@ def replay_energy_data(producer):
     """Replay energy data from Parquet files to Kafka."""
     print("Replaying energy data...")
 
-    files = [f for f in os.listdir(DATA_DIR) if f.startswith("energy_production_") and f.endswith(".parquet")]
+    files = [f for f in os.listdir(DATA_DIR) if f.startswith("energy_data_") and f.endswith(".parquet")]
     files.sort()
 
     if not files:

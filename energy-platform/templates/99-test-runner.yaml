@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ .Release.Name }}-test-runner"
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  containers:
+    - name: test-runner
+      image: "{{ .Values.tests.image.repository }}:{{ .Values.tests.image.tag }}"
+      imagePullPolicy: {{ .Values.tests.image.pullPolicy }}
+      command: ["pytest"]
+      args: ["-v", "-s"]
+      env:
+        # Kafka
+        - name: KAFKA_BOOTSTRAP_SERVERS
+          value: "{{ .Release.Name }}-energy-cluster:9092"
+
+        # Schema Registry
+        - name: SCHEMA_REGISTRY_URL
+          value: "http://schema-registry:8081"
+
+        # TimescaleDB
+        - name: DB_HOST
+          value: "timescaledb"
+        - name: DB_PORT
+          value: "5432"
+        - name: DB_NAME
+          value: "power_grid"
+        - name: DB_USER
+          value: "postgres"
+        - name: DB_PASS
+          valueFrom:
+            secretKeyRef:
+              name: timescaledb-secret
+              key: password
+
+        # Hive
+        - name: HIVE_METASTORE_URI
+          value: "thrift://hive-metastore:9083"
+
+        # Spark / HDFS
+        - name: HADOOP_USER_NAME
+          value: "root"
+        # Point to NameNode for HDFS tests
+        - name: HADOOP_CONF_DIR
+          value: "/etc/hadoop"
+
+      # Mount HDFS config so PySpark/HDFS tests work
+      volumeMounts:
+        - name: hdfs-config
+          mountPath: /etc/hadoop/core-site.xml
+          subPath: core-site.xml
+
+  volumes:
+    - name: hdfs-config
+      configMap:
+        name: hdfs-client-config
+  restartPolicy: Never

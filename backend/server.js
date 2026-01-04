@@ -1,4 +1,5 @@
 const { Kafka } = require('kafkajs');
+const { SchemaRegistry, SchemaType } = require('@kafkajs/confluent-schema-registry');
 const WebSocket = require('ws');
 const express = require('express');
 const http = require('http');
@@ -8,6 +9,7 @@ const { URL } = require('url');
 
 // Configuration from environment variables
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
+const SCHEMA_REGISTRY_URL = process.env.SCHEMA_REGISTRY_URL || 'http://schema-registry:8081';
 const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'energy_actual';
 const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'energy_predictions';
 const PORT = process.env.PORT || 8080;
@@ -28,6 +30,9 @@ const kafka = new Kafka({
     retries: 15
   }
 });
+
+// Initialize Schema Registry
+const registry = new SchemaRegistry({ host: SCHEMA_REGISTRY_URL });
 
 const consumer = kafka.consumer({ groupId: CONSUMER_GROUP });
 
@@ -214,9 +219,13 @@ app.post('/api/historical', async (req, res) => {
       `;
       params = [selectedInterval, startDate, endDate, type || null];
     }
-    
+
+    console.log(`[DEBUG] Querying historical data: ${selectedInterval}, Table: ${tableName}, Range: ${startDate.toISOString()} - ${endDate.toISOString()}`);
+
     const result = await pool.query(query, params);
-    
+
+    console.log(`[DEBUG] Query returned ${result.rows.length} rows. First row:`, result.rows[0]);
+
     res.json({
       data: result.rows,
       metadata: {
@@ -316,12 +325,20 @@ async function setupKafka() {
     await consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
         try {
-          const value = JSON.parse(message.value.toString());
+          let value;
+
+          // Try to decode with Schema Registry first
+          try {
+            value = await registry.decode(message.value);
+          } catch (e) {
+            // Fallback to JSON if not Avro
+            value = JSON.parse(message.value.toString());
+          }
           
           if (topic === ACTUAL_TOPIC) {
             const dataPoint = {
-              timestamp: value.timestamp || new Date().toISOString(),
-              value: parseFloat(value.total_consumption_mwh || value.value || 0),
+              timestamp: value.timestamp || value.HourUTC || value.HourDK || new Date().toISOString(),
+              value: parseFloat(value.total_consumption_mwh || value.value || value.ShareMWh || 0),
               production: parseFloat(value.total_production_mwh || 0),
               dk_area: value.dk_area,
               type: 'actual'
@@ -340,7 +357,7 @@ async function setupKafka() {
             console.log('Actual:', dataPoint.value.toFixed(2), 'MW');
           } else if (topic === PREDICTED_TOPIC) {
             const dataPoint = {
-              timestamp: value.timestamp || new Date().toISOString(),
+              timestamp: value.timestamp || value.HourUTC || value.HourDK || new Date().toISOString(),
               value: parseFloat(value.predictions?.consumption_mwh || value.value || 0),
               production: parseFloat(value.predictions?.production_mwh || 0),
               net_balance: parseFloat(value.predictions?.net_balance_mwh || 0),

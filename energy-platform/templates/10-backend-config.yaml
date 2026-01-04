@@ -7,5 +7,6 @@ data:
   KAFKA_BROKERS: "{{ .Release.Name }}-energy-cluster:9092"
   ACTUAL_TOPIC: "energy_actual"
   PREDICTED_TOPIC: "energy_predictions"
+  WEATHER_TOPIC: "weather-data"
   CONSUMER_GROUP: "power-grid-monitor"
   PORT: "8080"
