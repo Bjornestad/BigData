@@ -107,7 +107,7 @@ def process_all_station_data(all_features):
 
         # Parse timestamp
         try:
-            ts = pd.to_datetime(timestamp_str)
+            ts = pd.to_datetime(timestamp_str, utc=True)
         except:
             continue
 

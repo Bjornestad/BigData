@@ -29,19 +29,34 @@ spec:
             echo "============================================================"
             echo ""
 
-            # Step 1: Wait for historical fetch jobs (optional - may not exist)
-            echo "Step 1/3: Checking for historical fetch jobs..."
-            if kubectl get job fetch-historical-2021 -n $ns &>/dev/null; then
-              echo "  Historical fetch jobs found. Waiting for completion..."
-              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2021 --timeout=7200s
-              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2022 --timeout=7200s
-              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2023 --timeout=7200s
-              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2024 --timeout=7200s
-              kubectl wait -n $ns --for=condition=complete job/fetch-historical-2025 --timeout=7200s
-              echo "  ✓ Historical data fetch completed"
-            else
-              echo "  ⊘ Historical fetch jobs not found (skipping)"
-            fi
+            # Step 1: Start and wait for historical fetch jobs (5 parallel jobs for 2021-2025)
+            echo "Step 1/4: Starting historical data fetch jobs..."
+
+            # Delete old fetch jobs if they exist and are incomplete
+            for year in 2021 2022 2023 2024 2025; do
+              if kubectl get job fetch-historical-$year -n $ns &>/dev/null; then
+                status=$(kubectl get job fetch-historical-$year -n $ns -o jsonpath='{.status.succeeded}')
+                if [ "$status" != "1" ]; then
+                  echo "  Deleting incomplete fetch job for $year..."
+                  kubectl delete job fetch-historical-$year -n $ns --ignore-not-found=true
+                fi
+              fi
+            done
+            sleep 5
+
+            # Create all historical fetch jobs (they run in parallel)
+            echo "  Creating historical fetch jobs (2021-2025)..."
+            kubectl apply -f /config/fetch-historical-data-jobs.yaml
+
+            # Wait for all fetch jobs to complete in parallel
+            echo "  Waiting for historical data fetch to complete (this may take a while)..."
+            kubectl wait -n $ns --for=condition=complete job/fetch-historical-2021 --timeout=7200s &
+            kubectl wait -n $ns --for=condition=complete job/fetch-historical-2022 --timeout=7200s &
+            kubectl wait -n $ns --for=condition=complete job/fetch-historical-2023 --timeout=7200s &
+            kubectl wait -n $ns --for=condition=complete job/fetch-historical-2024 --timeout=7200s &
+            kubectl wait -n $ns --for=condition=complete job/fetch-historical-2025 --timeout=7200s &
+            wait
+            echo "  ✓ Historical data fetch completed (all years: 2021-2025)"
             echo ""
 
             # Step 2: Wait for weather hourly table (blocks until complete)
