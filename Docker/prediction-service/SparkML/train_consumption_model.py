@@ -6,7 +6,7 @@ Joins historical weather data with energy consumption data
 import os
 import datetime
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, year, month, dayofmonth, hour as spark_hour
+from pyspark.sql.functions import col, year, month, dayofmonth, hour as spark_hour, isnan
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import VectorAssembler, StandardScaler, Imputer
 from pyspark.ml.regression import RandomForestRegressor, GBTRegressor
@@ -134,7 +134,7 @@ def load_and_join_data(spark):
     joined_count = joined_df.count()
     print(f"  Joined records: {joined_count:,}")
 
-    # Sample 50% of data for faster training and less memory usage
+    # Sample 50% of data for training and less memory usage
     print("\nSampling 50% of data for training...")
     joined_df = joined_df.sample(fraction=0.5, seed=42)
     sampled_count = joined_df.count()
@@ -174,6 +174,20 @@ def split_data(df):
     test_count = test_df.count()
     print(f"Test set (Nov 2025): {test_count:,} records")
 
+    # Fallback to random split if training set is empty
+    if train_count == 0:
+        print("\nWARNING: Time-based split resulted in empty training set.")
+        print("Falling back to random split (80/10/10)...")
+        train_df, val_df, test_df = df.randomSplit([0.8, 0.1, 0.1], seed=42)
+        train_count = train_df.count()
+        val_count = val_df.count()
+        test_count = test_df.count()
+        
+        print(f"\nNew split counts:")
+        print(f"Training set: {train_count:,} records")
+        print(f"Validation set: {val_count:,} records")
+        print(f"Test set: {test_count:,} records")
+
     return train_df, val_df, test_df
 
 def build_and_train_model(train_df, val_df):
@@ -189,12 +203,37 @@ def build_and_train_model(train_df, val_df):
     print(f"  - {len(WEATHER_FEATURES)} weather features")
     print(f"  - {len(TEMPORAL_FEATURES)} temporal features")
 
+    # DEBUG: Check for empty columns
+    print("\nChecking feature data quality in training set...")
+    total_rows = train_df.count()
+    print(f"Total training rows: {total_rows}")
+    
+    empty_cols = []
+    for feature in WEATHER_FEATURES:
+        # Count nulls or nans
+        null_count = train_df.filter(col(feature).isNull() | isnan(col(feature))).count()
+        
+        # Count zeros (just for info)
+        zero_count = train_df.filter(col(feature) == 0).count()
+        
+        if null_count == total_rows:
+            print(f"!!! CRITICAL: Feature '{feature}' is ALL NULL/NaN in training set")
+            empty_cols.append(feature)
+        elif null_count > 0:
+            print(f"  Feature '{feature}' has {null_count} missing values ({null_count/total_rows*100:.1f}%)")
+        
+        if zero_count > 0:
+            print(f"  Feature '{feature}' has {zero_count} zero values")
+            
+    if empty_cols:
+        print(f"\nFound {len(empty_cols)} completely empty columns: {empty_cols}")
+
     # Build pipeline with Imputer to handle NULL values
     imputer = Imputer(
         inputCols=WEATHER_FEATURES,
         outputCols=[f"{c}_imputed" for c in WEATHER_FEATURES],
         strategy="mean"
-    )
+    ).setMissingValue(float("nan"))
 
     # Use imputed features + temporal features
     imputed_features = [f"{c}_imputed" for c in WEATHER_FEATURES] + TEMPORAL_FEATURES

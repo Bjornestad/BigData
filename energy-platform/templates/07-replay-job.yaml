@@ -38,13 +38,19 @@ spec:
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "{{ .Release.Name }}-energy-cluster:9092"
-            # No DATA_DIR needed, uses HDFS paths hardcoded in script
+            - name: DATA_DIR
+              value: "/data/historical_energy_batches" # Point to where fetcher saves data
           volumeMounts:
             - name: replay-script
               mountPath: /app/scripts/replay_to_kafka.py
               subPath: replay_to_kafka.py
+            - name: data-volume
+              mountPath: /data
       volumes:
         - name: replay-script
           configMap:
             name: replay-script
             defaultMode: 0755
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: weather-data-pvc # Updated to match existing PVC

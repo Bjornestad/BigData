@@ -37,6 +37,8 @@ spec:
           value: "600"  # 10 minutes
         - name: JAVA_HOME
           value: "/opt/java/openjdk"
+        - name: HIVE_METASTORE_URI
+          value: "thrift://hive-metastore.{{ .Release.Namespace }}.svc.cluster.local:9083"
         volumeMounts:
         - name: code
           mountPath: /data

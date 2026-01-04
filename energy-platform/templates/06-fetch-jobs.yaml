@@ -25,7 +25,7 @@ spec:
       volumes:
         - name: data-volume
           persistentVolumeClaim:
-            claimName: data-pvc
+            claimName: weather-data-pvc # Updated to match existing PVC
 ---
 apiVersion: batch/v1
 kind: Job
@@ -54,4 +54,4 @@ spec:
       volumes:
         - name: data-volume
           persistentVolumeClaim:
-            claimName: data-pvc
+            claimName: weather-data-pvc # Updated to match existing PVC

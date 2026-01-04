@@ -10,6 +10,12 @@ database_writer:
     tag: database-writer-latest
     pullPolicy: Always
 
+tests:
+  image:
+    repository: dummystad/bigdata
+    tag: tests-latest
+    pullPolicy: Always
+
 timescaledb:
   user: postgres
   password: "changeme123"

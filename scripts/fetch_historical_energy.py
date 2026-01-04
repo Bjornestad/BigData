@@ -162,6 +162,8 @@ def main():
             partition_file = os.path.join(DATA_DIR, f"energy_year={year}_month={month}_batch={batch_num}.parquet")
             
             print(f"DEBUG: Saving to {partition_file}...")
+            print(f"DEBUG: Column types: {group.dtypes}") # Added debug print
+            
             # Use version='1.0' AND disable dictionary encoding for maximum compatibility
             # AND we are now writing Strings for timestamps, which is very safe
             group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False, version='1.0', use_dictionary=False)

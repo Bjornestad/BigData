@@ -54,7 +54,7 @@ data:
         { "name": "temp_soil_min_past1h", "type": ["null", "double"], "default": null },
         { "name": "visib_mean_last10min", "type": ["null", "double"], "default": null },
         { "name": "visibility", "type": ["null", "double"], "default": null },
-        { "name": "weather", "type": ["null", "string"], "default": null },
+          { "name": "weather", "type": ["null", "string"], "default": null },
         { "name": "wind_dir", "type": ["null", "double"], "default": null },
         { "name": "wind_dir_past1h", "type": ["null", "double"], "default": null },
         { "name": "wind_gust_always_past1h", "type": ["null", "double"], "default": null },
