@@ -1,6 +1,6 @@
 import pyarrow.parquet as pq
 
-file_path = 'problem_file.parquet'
+file_path = 'check_me.parquet'
 try:
     parquet_file = pq.ParquetFile(file_path)
 

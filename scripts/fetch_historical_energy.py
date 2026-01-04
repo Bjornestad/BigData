@@ -79,10 +79,19 @@ def process_batch_data(records):
 
     df = pd.DataFrame(records)
 
-    # Parse timestamp
-    df['HourDK'] = pd.to_datetime(df['HourDK'])
-    df['year'] = df['HourDK'].dt.year
-    df['month'] = df['HourDK'].dt.month
+    # Parse timestamp to get year/month for partitioning
+    # But keep the column itself as STRING to avoid Parquet/Spark timestamp compatibility issues
+    temp_ts = pd.to_datetime(df['HourDK'])
+    df['year'] = temp_ts.dt.year
+    df['month'] = temp_ts.dt.month
+    
+    # Ensure timestamp columns are strings (ISO format)
+    # This matches the Hive table definition (STRING) and avoids Parquet INT96/INT64 encoding issues
+    df['HourDK'] = df['HourDK'].astype(str)
+    if 'HourUTC' in df.columns:
+        df['HourUTC'] = df['HourUTC'].astype(str)
+    if 'Updated' in df.columns:
+        df['Updated'] = df['Updated'].astype(str)
 
     # Keep all fields from ConsumptionCoverageLocationBased API
     required_cols = ['HourUTC', 'HourDK', 'PriceArea', 'ConnectedArea', 'ViaArea', 'SharePPM', 'ShareMWh', 'Updated', 'year', 'month']
@@ -144,18 +153,18 @@ def main():
             print(f"  ⚠ No records after processing, stopping")
             break
 
-        # Get date range in this batch
-        oldest_date = pd.to_datetime(df['HourDK']).min()
-        newest_date = pd.to_datetime(df['HourDK']).max()
-        print(f"  Date range: {oldest_date} to {newest_date}")
+        # Get date range in this batch (using the temp year/month columns or re-parsing for display)
+        # Since we converted to string, we can just take min/max of string for rough range
+        print(f"  Date range: {df['HourDK'].min()} to {df['HourDK'].max()}")
 
         # Copy to HDFS directly (partitioned by year/month from the data)
         for (year, month), group in df.groupby(['year', 'month']):
             partition_file = os.path.join(DATA_DIR, f"energy_year={year}_month={month}_batch={batch_num}.parquet")
             
             print(f"DEBUG: Saving to {partition_file}...")
-            # Use version='1.0' for compatibility with Spark
-            group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False, version='1.0')
+            # Use version='1.0' AND disable dictionary encoding for maximum compatibility
+            # AND we are now writing Strings for timestamps, which is very safe
+            group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False, version='1.0', use_dictionary=False)
             
             if os.path.exists(partition_file):
                 size = os.path.getsize(partition_file)

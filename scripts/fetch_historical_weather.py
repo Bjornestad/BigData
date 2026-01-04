@@ -213,12 +213,15 @@ def main():
         # Get the oldest timestamp in this batch
         oldest_ts = pd.to_datetime(df["timeObserved"], utc=True).min()
         print(f"  Oldest record: {oldest_ts}")
+        
+        # Ensure timeObserved is string to avoid Parquet timestamp issues
+        df['timeObserved'] = df['timeObserved'].astype(str)
 
         # Copy to HDFS directly (partitioned by year/month from the data)
         for (year, month), group in df.groupby(['year', 'month']):
             partition_file = os.path.join(DATA_DIR, f"weather_year={year}_month={month}_batch={batch_num}.parquet")
-            # Use version='1.0' for compatibility with Spark
-            group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False, version='1.0')
+            # Use version='1.0' AND disable dictionary encoding for maximum compatibility
+            group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False, version='1.0', use_dictionary=False)
 
             hdfs_file = f"{HDFS_TARGET}/year={year}/month={month}/batch_{batch_num:04d}.parquet"
             if copy_to_hdfs(partition_file, hdfs_file):
