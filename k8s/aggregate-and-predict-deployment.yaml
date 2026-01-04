@@ -45,13 +45,13 @@ spec:
             echo ""
 
             # Step 2: Wait for weather hourly table (blocks until complete)
-            echo "Step 2/3: Waiting for weather_area_hourly table..."
+            echo "Step 2/4: Waiting for weather_area_hourly table..."
             kubectl wait -n $ns --for=condition=complete job/create-weather-hourly-table --timeout=7200s
             echo "✓ Weather hourly table created"
             echo ""
 
             # Step 3: Only AFTER weather table is ready, start model training
-            echo "Step 3/3: Starting model training job..."
+            echo "Step 3/4: Starting model training job..."
             # Delete old training job if it exists and is not complete
             if kubectl get job train-ml-model -n $ns &>/dev/null; then
               status=$(kubectl get job train-ml-model -n $ns -o jsonpath='{.status.succeeded}')
@@ -71,6 +71,20 @@ spec:
             echo "  Waiting for model training to complete..."
             kubectl wait -n $ns --for=condition=complete job/train-ml-model --timeout=7200s
             echo "✓ Model training completed"
+            echo ""
+
+            # Step 4: Start realtime fetcher deployment
+            echo "Step 4/4: Starting realtime data fetcher..."
+            # Delete old fetcher if it exists
+            if kubectl get deployment realtime-fetcher -n $ns &>/dev/null; then
+              echo "  Deleting old realtime-fetcher deployment..."
+              kubectl delete deployment realtime-fetcher -n $ns --ignore-not-found=true
+              sleep 5
+            fi
+
+            echo "  Creating realtime-fetcher deployment..."
+            kubectl apply -f /config/realtime-fetcher.yaml
+            echo "✓ Realtime fetcher started"
             echo ""
 
             echo "============================================================"
