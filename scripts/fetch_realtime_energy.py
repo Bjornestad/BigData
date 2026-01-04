@@ -43,7 +43,7 @@ AVRO_SCHEMA = """{
 producer = None
 avro_serializer = None
 
-def fetch_consumption_actual(hours_back=24):
+def fetch_consumption_actual(hours_back):
     """Fetch actual consumption data from Energinet (real-time, no delay)"""
     end_time = datetime.now()
     start_time = end_time - timedelta(hours=hours_back)
@@ -185,7 +185,7 @@ def main():
 
         # Fetch consumption data (real-time, no delay)
         print("  Fetching consumption data from Energinet (real-time)...")
-        raw_records = fetch_consumption_actual(hours_back=24)
+        raw_records = fetch_consumption_actual(1)
         print(f"  Fetched: {len(raw_records)} raw consumption records")
 
         # Process raw records to match Avro schema

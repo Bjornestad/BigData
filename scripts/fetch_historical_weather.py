@@ -117,7 +117,8 @@ def process_all_station_data(all_features):
             'timeObserved': timestamp_str,
             'value': float(value) if value is not None else None,
             'year': ts.year,
-            'month': ts.month
+            'month': ts.month,
+            'day': ts.day
         })
 
     if not records:
@@ -213,16 +214,16 @@ def main():
         oldest_ts = pd.to_datetime(df["timeObserved"], utc=True).min()
         print(f"  Oldest record: {oldest_ts}")
 
-        # Copy to HDFS directly (partitioned by year/month from the data)
-        for (year, month), group in df.groupby(['year', 'month']):
-            partition_file = os.path.join(DATA_DIR, f"temp_year={year}_month={month}_batch={batch_num}.parquet")
+        # Copy to HDFS directly (partitioned by year/month/day from the data)
+        for (year, month, day), group in df.groupby(['year', 'month', 'day']):
+            partition_file = os.path.join(DATA_DIR, f"temp_year={year}_month={month}_day={day}_batch={batch_num}.parquet")
             group.to_parquet(partition_file, engine='pyarrow', compression='snappy', index=False)
 
-            hdfs_file = f"{HDFS_TARGET}/year={year}/month={month}/batch_{batch_num:04d}.parquet"
+            hdfs_file = f"{HDFS_TARGET}/year={year}/month={month}/day={day}/batch_{batch_num:04d}.parquet"
             if copy_to_hdfs(partition_file, hdfs_file):
-                print(f"  ✓ HDFS: year={year}/month={month} ({len(group):,} records)")
+                print(f"  ✓ HDFS: year={year}/month={month}/day={day} ({len(group):,} records)")
             else:
-                print(f"  ⚠ Failed to copy year={year}/month={month} to HDFS")
+                print(f"  ⚠ Failed to copy year={year}/month={month}/day={day} to HDFS")
 
             # Clean up temp file immediately
             os.remove(partition_file)
