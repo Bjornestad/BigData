@@ -11,3 +11,7 @@ jsonschema
 fastavro
 attrs
 httpx
+pytest
+pyspark
+mock
+psycopg2-binary
