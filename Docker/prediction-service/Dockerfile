@@ -6,7 +6,8 @@ RUN apt-get update -qq && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python packages
-RUN pip3 install -q --no-cache-dir --break-system-packages kafka-python pyspark pandas numpy
+# Added confluent-kafka for better compatibility
+RUN pip3 install -q --no-cache-dir --break-system-packages kafka-python pyspark pandas numpy confluent-kafka
 
 # Set working directory
 WORKDIR /app

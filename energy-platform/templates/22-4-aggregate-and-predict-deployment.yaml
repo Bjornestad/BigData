@@ -25,7 +25,7 @@ spec:
             cd /app/SparkML
             python3 -u aggregate_and_predict_service.py
         env:
-        - name: KAFKA_BOOTSTRAP
+        - name: KAFKA_BOOTSTRAP_SERVERS
           value: "{{ .Release.Name }}-energy-cluster:9092"
         - name: OUTPUT_TOPIC
           value: "energy_predictions"

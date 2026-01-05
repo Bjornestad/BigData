@@ -108,15 +108,14 @@ async function flushBatch() {
       item.type
     ]);
     
-    // Use ON CONFLICT DO UPDATE SET value = EXCLUDED.value
-    // Note: This overwrites the DB value with the new SUM from this batch.
-    // Ideally, we should do value = measurements.value + EXCLUDED.value, but that risks double-counting on replay.
-    // Since we process in batches, and a batch likely contains all areas for a timestamp, overwriting with the batch sum is safer.
+    // Use ON CONFLICT DO UPDATE SET value = measurements.value + EXCLUDED.value
+    // This allows summing up values from different batches (e.g. DK1 in batch 1, DK2 in batch 2)
+    // Note: This assumes we start with a clean DB or handle duplicates upstream.
     const query = `
       INSERT INTO measurements (time, value, type) 
       VALUES ${values}
       ON CONFLICT (time, type) DO UPDATE 
-      SET value = EXCLUDED.value
+      SET value = measurements.value + EXCLUDED.value
     `;
     
     await pool.query(query, params);

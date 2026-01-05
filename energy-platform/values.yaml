@@ -16,6 +16,10 @@ tests:
     tag: tests-latest
     pullPolicy: Always
 
+jobs:
+  initializeSystem:
+    enabled: false
+
 timescaledb:
   user: postgres
   password: "changeme123"

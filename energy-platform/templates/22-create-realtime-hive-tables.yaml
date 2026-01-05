@@ -60,15 +60,17 @@ spec:
               timeObserved STRING,
               value DOUBLE,
               year INT,
-              month INT
+              month INT,
+              day INT
             ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/weather_observations_historical';
 
             -- 2. Raw Energy Data (from fetch-historical-energy job)
             -- Location: /user/hive/warehouse/energy_actual
             -- Schema matches process_batch_data in fetch_historical_energy.py
+            -- HourDK is stored as INT64 (Nanoseconds) in Parquet by Pandas. Reading as BIGINT to avoid Spark type mismatch.
             CREATE EXTERNAL TABLE energy_raw_historical (
               HourUTC STRING,
-              HourDK STRING,
+              HourDK BIGINT,
               PriceArea STRING,
               ConnectedArea STRING,
               ViaArea STRING,
@@ -76,7 +78,8 @@ spec:
               ShareMWh DOUBLE,
               Updated STRING,
               year INT,
-              month INT
+              month INT,
+              day INT
             ) STORED AS PARQUET LOCATION 'hdfs://namenode:9000/user/hive/warehouse/energy_actual';
 
             -- 3. Realtime Weather Data (from Kafka Connect)
@@ -137,17 +140,18 @@ spec:
             -- View for Energy Aggregation (consumption_area_hourly)
             -- Aggregates raw municipality data to DK area level
             -- Note: PriceArea is already DK1/DK2. We sum ShareMWh.
+            -- HourDK is BIGINT (nanoseconds). Convert to micros for Spark timestamp.
             CREATE VIEW consumption_area_hourly AS
             SELECT
               PriceArea as dk_area,
               year, month,
-              day(to_timestamp(HourDK)) as day,
-              hour(to_timestamp(HourDK)) as hour,
+              day(timestamp_micros(cast(HourDK / 1000 as long))) as day,
+              hour(timestamp_micros(cast(HourDK / 1000 as long))) as hour,
               SUM(ShareMWh) as consumption_mwh_area
             FROM energy_raw_historical
             GROUP BY
               PriceArea,
-              year, month, day(to_timestamp(HourDK)), hour(to_timestamp(HourDK));
+              year, month, day(timestamp_micros(cast(HourDK / 1000 as long))), hour(timestamp_micros(cast(HourDK / 1000 as long)));
 
             -- Create table for tracking predictions (used by prediction service)
             CREATE TABLE IF NOT EXISTS predicted_buckets (

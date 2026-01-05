@@ -1,3 +1,4 @@
+{{- if .Values.jobs.initializeSystem.enabled }}
 # This job is intended to be run once to initialize the entire system.
 # It creates Hive tables, fetches historical data, trains the model, and starts the prediction service.
 # It requires a Docker image with Spark, Hadoop clients, and all project scripts and dependencies.
@@ -6,10 +7,11 @@ kind: Job
 metadata:
   name: system-initialization
   namespace: {{ .Release.Namespace }}
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "10"
-    "helm.sh/hook-delete-policy": before-hook-creation
+  # Hooks removed to allow manual control via values.yaml
+  # annotations:
+  #   "helm.sh/hook": post-install,post-upgrade
+  #   "helm.sh/hook-weight": "10"
+  #   "helm.sh/hook-delete-policy": before-hook-creation
 spec:
   backoffLimit: 1
   template:
@@ -54,7 +56,7 @@ spec:
           # NOTE: This job requires an image with Spark, Python dependencies, and all project scripts.
           image: dummystad/bigdata:prediction-service-latest
           imagePullPolicy: Always
-          command: ["/bin/sh", "-c"]
+          command: ["/bin/sh", "-c" ]
           args:
             - |
               echo "Starting system initialization..."
@@ -77,3 +79,4 @@ spec:
             # Set a high value for historical days to populate the system
             - name: FETCH_HISTORICAL_DAYS
               value: "10"
+{{- end }}

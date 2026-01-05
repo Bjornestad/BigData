@@ -41,6 +41,9 @@ def create_spark_session():
         .config("spark.executor.memory", "4g") \
         .config("spark.hadoop.hive.exec.dynamic.partition", "true") \
         .config("spark.hadoop.hive.exec.dynamic.partition.mode", "nonstrict") \
+        .config("spark.sql.parquet.enableVectorizedReader", "false") \
+        .config("spark.sql.files.ignoreCorruptFiles", "true") \
+        .config("spark.sql.files.ignoreMissingFiles", "true") \
         .enableHiveSupport() \
         .getOrCreate()
 
@@ -109,13 +112,12 @@ def create_hourly_weather_aggregates(spark):
         spark.sql("MSCK REPAIR TABLE weather_raw_avro")
 
         # Check if weather_raw_avro has data
-        count = spark.sql("SELECT COUNT(*) as count FROM weather_raw_avro").collect()[0]['count']
-        print(f"  Found {count:,} raw weather observations")
-
-        if count == 0:
-            print("    ⚠️  No weather data found - skipping hourly aggregation")
-            print("    You'll need to fetch historical data and run create_weather_area_hourly_raw_params.py manually")
-            return
+        try:
+            count = spark.sql("SELECT COUNT(*) as count FROM weather_raw_avro").collect()[0]['count']
+            print(f"  Found {count:,} raw weather observations")
+        except Exception as e:
+            print(f"    ⚠️  Error counting weather_raw_avro (likely corrupted files): {e}")
+            print("    Proceeding with available data due to ignoreCorruptFiles=true")
 
         # Run the aggregation script
         print("  Running create_weather_area_hourly_raw_params.py...")

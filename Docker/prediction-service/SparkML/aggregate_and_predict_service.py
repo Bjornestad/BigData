@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+print("--- SCRIPT VERSION 9 ---")
 """
 Combined Weather Aggregation and Energy Prediction Service
 1. Aggregates weather_raw_avro (long format) to weather_area_hourly (wide format)
@@ -9,8 +10,8 @@ import os
 import sys
 import json
 import time
-from datetime import datetime, timedelta
-from kafka import KafkaProducer, KafkaConsumer
+from datetime import datetime, timedelta, timezone
+from confluent_kafka import Producer, Consumer, KafkaError
 from pyspark.sql import SparkSession
 from pyspark.ml import PipelineModel
 from pyspark.sql.functions import col, avg, max as spark_max, min as spark_min, count, sin, cos, radians, lit
@@ -54,13 +55,20 @@ spark = SparkSession.builder \
     .appName("AggregateAndPredict") \
     .config("spark.hadoop.hive.metastore.uris", "thrift://hive-metastore:9083") \
     .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
-    .config("spark.driver.memory", "3g") \
+    .config("spark.driver.memory", "4g") \
     .config("spark.driver.maxResultSize", "2g") \
-    .config("spark.sql.shuffle.partitions", "10") \
+    .config("spark.sql.shuffle.partitions", "4") \
+    .config("spark.default.parallelism", "4") \
+    .config("spark.executor.cores", "1") \
     .config("spark.sql.adaptive.enabled", "true") \
     .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
     .config("spark.hadoop.hive.exec.dynamic.partition", "true") \
     .config("spark.hadoop.hive.exec.dynamic.partition.mode", "nonstrict") \
+    .config("spark.sql.files.ignoreCorruptFiles", "true") \
+    .config("spark.sql.files.ignoreMissingFiles", "true") \
+    .config("spark.hadoop.ipc.client.connect.max.retries", "50") \
+    .config("spark.hadoop.ipc.client.connect.retry.interval", "2000") \
+    .config("spark.hadoop.dfs.client.socket-timeout", "120000") \
     .enableHiveSupport() \
     .getOrCreate()
 
@@ -108,7 +116,7 @@ try:
     from py4j.protocol import Py4JJavaError
 
     # If CONSUMPTION_MODEL_PATH is a directory, find the latest model using Spark
-    if not CONSUMPTION_MODEL_PATH.endswith("energy_consumption_model_"):
+    if not CONSUMPTION_MODEL_PATH.endswith("energy_model_consumption"):
         try:
             # Use Spark's Hadoop FileSystem API to list directory
             # Get Hadoop configuration from Spark
@@ -127,7 +135,7 @@ try:
 
                 for status in file_statuses:
                     file_path = status.getPath().toString()
-                    if 'energy_consumption_model_' in file_path:
+                    if 'energy_model_consumption' in file_path:
                         model_dirs.append(file_path)
 
                 if model_dirs:
@@ -156,11 +164,10 @@ except Exception as e:
 # Initialize Kafka producer
 print("Connecting to Kafka...")
 try:
-    producer = KafkaProducer(
-        bootstrap_servers=KAFKA_BOOTSTRAP,
-        value_serializer=lambda v: json.dumps(v, default=str).encode('utf-8'),
-        key_serializer=lambda k: k.encode('utf-8') if k else None
-    )
+    producer = Producer({
+        'bootstrap.servers': KAFKA_BOOTSTRAP,
+        'client.id': 'aggregate-predict-service'
+    })
     print(f"✓ Connected to Kafka: {KAFKA_BOOTSTRAP}")
     print(f"✓ Publishing to: {OUTPUT_TOPIC}\n")
 except Exception as e:
@@ -245,42 +252,27 @@ def aggregate_latest_10min():
         # Clean metadata files that might confuse Avro reader
         clean_spark_metadata(spark, "weather_raw_avro")
 
-        # First, get the latest observation timestamp by filtering on observed timestamp
-        # Only look at last 30 minutes since new data arrives every 10 minutes
-        from datetime import datetime as dt
-        now = dt.now()
-        cutoff = (now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:00Z")
-
-        # Use partition pruning to only scan recent partitions
-        cutoff_year = now.year
-        cutoff_month = now.month
-        cutoff_day = now.day
-
-        latest_result = spark.sql(f"""
-            SELECT MAX(timeObserved) as latest
-            FROM weather_raw_avro
-            WHERE year = {cutoff_year}
-            AND month = {cutoff_month}
-            AND day = {cutoff_day}
-            AND timeObserved >= '{cutoff}'
-        """).collect()[0]
+        # Step 1: Find the absolute latest timestamp in the entire table.
+        # This is more robust against data delays but less efficient.
+        print("  Finding latest observation timestamp...")
+        latest_result = spark.sql("SELECT MAX(timeObserved) as latest FROM weather_raw_avro").collect()[0]
         latest_observed = latest_result["latest"]
 
         if not latest_observed:
-            print("  ⚠️  No observations found")
+            print("  ⚠️  No observations found in weather_raw_avro at all.")
             return None
 
-        # Parse the latest observation timestamp
-        from datetime import datetime as dt
-        latest_dt = dt.strptime(latest_observed, "%Y-%m-%dT%H:%M:%SZ")
+        # Step 2: Check if this timestamp is recent enough to be worth processing.
+        latest_dt = datetime.strptime(latest_observed, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        
+        if (now_utc - latest_dt) > timedelta(hours=2):
+            print(f"  ⚠️  Latest observation is too old ({latest_observed}), skipping.")
+            return None
 
-        # Calculate current 10-minute bucket
-        current_bucket = (latest_dt.minute // 10) * 10
-
-        # Calculate the bucket from 30 minutes ago (3 buckets back)
-        # E.g., if current time is 21:50, aggregate 21:20 bucket (21:20:00-21:29:59)
-        # This ensures the bucket has fully completed and all data has arrived
-        bucket_dt = latest_dt.replace(minute=current_bucket, second=0, microsecond=0) - timedelta(minutes=30)
+        # Step 3: Calculate the target bucket to aggregate (30 mins before the latest data)
+        current_bucket_minute = (latest_dt.minute // 10) * 10
+        bucket_dt = latest_dt.replace(minute=current_bucket_minute, second=0, microsecond=0) - timedelta(minutes=30)
 
         year = bucket_dt.year
         month = bucket_dt.month
@@ -289,7 +281,7 @@ def aggregate_latest_10min():
         minute_bucket = bucket_dt.minute
 
         print(f"  Latest observation: {latest_observed}")
-        print(f"  Aggregating bucket from 30 min ago: {year}-{month:02d}-{day:02d} {hour:02d}:{minute_bucket:02d}")
+        print(f"  Target bucket to aggregate: {year}-{month:02d}-{day:02d} {hour:02d}:{minute_bucket:02d}")
 
         bucket_key = (year, month, day, hour, minute_bucket)
 
@@ -313,50 +305,43 @@ def aggregate_latest_10min():
             print(f"  ⏭️  Already aggregated ({existing_count} records)")
             return None
 
-        # Filter observations for this specific 10-minute bucket DIRECTLY in SQL
-        # Calculate end time for the bucket (handle hour rollover)
+        # Step 4: Efficiently read ONLY the data for the target bucket using partition pruning
         bucket_end_dt = bucket_dt + timedelta(minutes=10)
         bucket_end_str = bucket_end_dt.strftime("%Y-%m-%dT%H:%M:00Z")
         bucket_start_str = bucket_dt.strftime("%Y-%m-%dT%H:%M:00Z")
 
-        # Extract partition values for efficient partition pruning
-        bucket_year = bucket_dt.year
-        bucket_month = bucket_dt.month
-        bucket_day = bucket_dt.day
-
-        # Read ONLY the specific 10-minute bucket from Hive - much more memory efficient
-        # CRITICAL: Filter on partition columns (year, month, day) FIRST for partition pruning
+        print(f"  Reading data for bucket: {bucket_start_str} to {bucket_end_str}")
         bucket_df = spark.sql(f"""
-            SELECT stationId, parameterId, value, timeObserved
+            SELECT stationId as station_id, parameterId as parameter_id, value, timeObserved as observed
             FROM weather_raw_avro
-            WHERE year = {bucket_year}
-            AND month = {bucket_month}
-            AND day = {bucket_day}
+            WHERE year = {year}
+            AND month = {month}
+            AND day = {day}
             AND timeObserved >= '{bucket_start_str}'
             AND timeObserved < '{bucket_end_str}'
         """) \
-            .withColumn("observed_ts", to_timestamp(col("timeObserved"), "yyyy-MM-dd'T'HH:mm:ss'Z'")) \
+            .withColumn("observed_ts", to_timestamp(col("observed"), "yyyy-MM-dd'T'HH:mm:ss'Z'")) \
             .withColumn("year", pyspark_year(col("observed_ts"))) \
             .withColumn("month", pyspark_month(col("observed_ts"))) \
             .withColumn("day", dayofmonth(col("observed_ts"))) \
             .withColumn("hour", pyspark_hour(col("observed_ts"))) \
             .withColumn("minute", F.minute(col("observed_ts"))) \
             .withColumn("minute_bucket", (F.col("minute") / 10).cast("int") * 10) \
-            .select("stationId", "parameterId", "value", "year", "month", "day", "hour", "minute_bucket")
+            .select("station_id", "parameter_id", "value", "year", "month", "day", "hour", "minute_bucket")
 
         obs_count = bucket_df.count()
-        print(f"  ✓ Found {obs_count:,} observations")
+        print(f"  ✓ Found {obs_count:,} observations for the target bucket")
 
         if obs_count == 0:
             return False
 
         # Pivot to wide format
-        wide_df = bucket_df.groupBy("stationId", "year", "month", "day", "hour", "minute_bucket") \
-            .pivot("parameterId") \
+        wide_df = bucket_df.groupBy("station_id", "year", "month", "day", "hour", "minute_bucket") \
+            .pivot("parameter_id") \
             .avg("value")
 
         # Add DK area
-        wide_df = wide_df.withColumn("dk_area", station_to_dk_area_udf(col("stationId")))
+        wide_df = wide_df.withColumn("dk_area", station_to_dk_area_udf(col("station_id")))
         wide_df = wide_df.filter(col("dk_area") != "UNKNOWN")
 
         # Safe aggregation helpers
@@ -458,8 +443,6 @@ def aggregate_latest_10min():
 
         write_thread = threading.Thread(target=async_write, daemon=True)
         write_thread.start()
-
-        print(f"  ✓ Started background write for bucket: {year}-{month:02d}-{day:02d} {hour:02d}:{minute_bucket:02d}")
 
         # Return the aggregated DataFrame so we can predict directly without re-querying
         return agg_df
@@ -679,10 +662,10 @@ def make_predictions(new_weather_df=None):
 
             key = f"DK_{timestamp_iso}"
 
-            producer.send(
+            producer.produce(
                 OUTPUT_TOPIC,
-                key=key,
-                value=prediction
+                key=key.encode('utf-8'),
+                value=json.dumps(prediction, default=str).encode('utf-8')
             )
 
             print(f"  ✓ DK {timestamp_iso}: {pred_data['consumption']:.2f} MWh (combined)")
@@ -734,23 +717,26 @@ def aggregate_consumption_area_hourly():
         # Track last repair day for energy table
         global last_energy_repair_day
         if 'last_energy_repair_day' not in globals() or last_energy_repair_day != current_day:
-            print("  Repairing energy_actual table partitions (daily check)...")
-            spark.sql("MSCK REPAIR TABLE energy_actual")
+            # Removed MSCK REPAIR TABLE because energy_raw_historical is not partitioned in Hive
+            # spark.sql("MSCK REPAIR TABLE energy_raw_historical")
             last_energy_repair_day = current_day
         else:
             print("  Skipping energy partition repair (already done today)")
 
         # Clean metadata files that might confuse Avro reader
-        clean_spark_metadata(spark, "energy_actual")
+        clean_spark_metadata(spark, "energy_raw_historical")
 
         # Only read recent data (last 7 days) to avoid memory issues
         # Older data has already been aggregated in previous runs
         from datetime import datetime as dt
         cutoff_date = (dt.now() - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00")
+        
+        # Convert cutoff_date string to nanoseconds (BIGINT) for comparison with HourDK
+        cutoff_ts = int(dt.strptime(cutoff_date, "%Y-%m-%dT%H:%M:%S").timestamp() * 1_000_000_000)
 
         raw_consumption_df = spark.sql(f"""
-            SELECT * FROM energy_actual
-            WHERE HourDK >= '{cutoff_date}'
+            SELECT * FROM energy_raw_historical
+            WHERE HourDK >= {cutoff_ts}
         """)
 
         total_records = raw_consumption_df.count()
@@ -761,9 +747,9 @@ def aggregate_consumption_area_hourly():
         print(f"  ✓ Found {total_records:,} raw consumption records (last 7 days)")
 
         # Parse HourDK timestamp and extract time components
-        # HourDK format: "2025-01-03T21:00:00"
+        # HourDK is BIGINT (nanoseconds). Convert to micros for Spark timestamp.
         processed_df = raw_consumption_df \
-            .withColumn("hour_ts", to_timestamp(col("HourDK"), "yyyy-MM-dd'T'HH:mm:ss")) \
+            .withColumn("hour_ts", F.timestamp_micros((col("HourDK") / 1000).cast("long"))) \
             .withColumn("year", pyspark_year(col("hour_ts")).cast("int")) \
             .withColumn("month", pyspark_month(col("hour_ts")).cast("int")) \
             .withColumn("day", dayofmonth(col("hour_ts")).cast("int")) \
@@ -887,16 +873,14 @@ def kafka_event_listener():
 
     try:
         # Create Kafka consumer
-        consumer = KafkaConsumer(
-            WEATHER_INPUT_TOPIC,
-            ENERGY_INPUT_TOPIC,
-            bootstrap_servers=KAFKA_BOOTSTRAP,
-            group_id='aggregate-predict-service',
-            auto_offset_reset='latest',  # Only process new messages
-            enable_auto_commit=True,
-            consumer_timeout_ms=10000,  # 10 second timeout for checking
-            value_deserializer=lambda x: x  # We don't need to deserialize, just detect new messages
-        )
+        consumer = Consumer({
+            'bootstrap.servers': KAFKA_BOOTSTRAP,
+            'group.id': 'aggregate-predict-service',
+            'auto.offset.reset': 'latest',
+            'enable.auto.commit': True
+        })
+        
+        consumer.subscribe([WEATHER_INPUT_TOPIC, ENERGY_INPUT_TOPIC])
 
         print(f"   ✓ Kafka consumer connected\n")
 
@@ -906,49 +890,43 @@ def kafka_event_listener():
 
         while True:
             # Poll for new messages
-            messages = consumer.poll(timeout_ms=10000)
+            msg = consumer.poll(1.0)
 
-            if messages:
-                current_time = time.time()
+            if msg is None:
+                continue
+            if msg.error():
+                if msg.error().code() == KafkaError._PARTITION_EOF:
+                    continue
+                else:
+                    print(f"Kafka error: {msg.error()}")
+                    continue
 
-                # Count messages by topic
-                weather_count = sum(len(msgs) for topic_partition, msgs in messages.items()
-                                  if topic_partition.topic == WEATHER_INPUT_TOPIC)
-                energy_count = sum(len(msgs) for topic_partition, msgs in messages.items()
-                                 if topic_partition.topic == ENERGY_INPUT_TOPIC)
+            current_time = time.time()
+            topic = msg.topic()
 
-                # Trigger weather pipeline if weather data arrived
-                if weather_count > 0:
-                    if current_time - last_weather_trigger >= min_trigger_interval:
-                        print(f"\n📨 New weather data detected: {weather_count} messages")
-                        print(f"{'='*70}")
-                        print(f"WEATHER EVENT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                        print(f"{'='*70}")
+            # Trigger weather pipeline if weather data arrived
+            if topic == WEATHER_INPUT_TOPIC:
+                if current_time - last_weather_trigger >= min_trigger_interval:
+                    print(f"\n📨 New weather data detected")
+                    print(f"{'='*70}")
+                    print(f"WEATHER EVENT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    print(f"{'='*70}")
 
-                        # Run weather aggregation + prediction and reset timer
-                        run_weather_pipeline_with_timer()
-                        last_weather_trigger = current_time
-                    else:
-                        time_remaining = min_trigger_interval - (current_time - last_weather_trigger)
-                        print(f"   ⏱️  Weather data arrived, waiting {time_remaining:.0f}s...")
+                    # Run weather aggregation + prediction and reset timer
+                    run_weather_pipeline_with_timer()
+                    last_weather_trigger = current_time
 
-                # Trigger energy pipeline if energy data arrived
-                if energy_count > 0:
-                    if current_time - last_energy_trigger >= min_trigger_interval:
-                        print(f"\n📨 New energy data detected: {energy_count} messages")
-                        print(f"{'='*70}")
-                        print(f"ENERGY EVENT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                        print(f"{'='*70}")
+            # Trigger energy pipeline if energy data arrived
+            elif topic == ENERGY_INPUT_TOPIC:
+                if current_time - last_energy_trigger >= min_trigger_interval:
+                    print(f"\n📨 New energy data detected")
+                    print(f"{'='*70}")
+                    print(f"ENERGY EVENT - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                    print(f"{'='*70}")
 
-                        # Run energy aggregation only (predictions use lag features, don't need immediate trigger)
-                        run_energy_pipeline()
-                        last_energy_trigger = current_time
-                    else:
-                        time_remaining = min_trigger_interval - (current_time - last_energy_trigger)
-                        print(f"   ⏱️  Energy data arrived, waiting {time_remaining:.0f}s...")
-            else:
-                # No messages, just continue listening
-                pass
+                    # Run energy aggregation only (predictions use lag features, don't need immediate trigger)
+                    run_energy_pipeline()
+                    last_energy_trigger = current_time
 
     except Exception as e:
         print(f"\n✗ Kafka event listener error: {e}")

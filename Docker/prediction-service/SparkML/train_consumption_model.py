@@ -19,26 +19,28 @@ MODEL_OUTPUT_PATH = "/data/SparkML/models"
 MODEL_NAME = "energy_model_consumption"
 
 # Weather features - using Hive table column names directly
+# Note: These must match the columns in weather_area_hourly table
 WEATHER_FEATURES = [
-    "temp_mean_area",
-    "temp_max_area",
-    "temp_min_area",
-    "temp_grass_mean_area",
-    "temp_soil_mean_area",
-    "wind_speed_mean_area",
-    "wind_speed_max_area",
-    "wind_dir_sin_area",
-    "wind_dir_cos_area",
-    "wind_gust_always_past1h_max_area",
-    "radia_glob_past1h_area",
-    "sun_last1h_glob_area",
-    "sun_last10min_glob_area",
-    "precip_past1h_mean_area",
-    "precip_past10min_mean_area",
-    "humidity_mean_area",
-    "pressure_at_sea_mean_area",
-    "cloud_cover_mean_area",
-    "visibility_mean_area",
+    "temp_dry",
+    "temp_dew",
+    "temp_grass",
+    "temp_soil",
+    "wind_speed",
+    "wind_max",
+    "wind_dir", # We will use raw wind_dir if sin/cos not available, or handle it in feature eng
+    "radia_glob",
+    "radia_glob_past1h",
+    "sun_last10min_glob",
+    "precip_past10min",
+    "precip_dur_past10min",
+    "humidity",
+    "pressure",
+    "pressure_at_sea",
+    "cloud_cover",
+    "cloud_height",
+    "visibility",
+    "visib_mean_last10min",
+    "leav_hum_dur_past10min",
     "n_stations"
 ]
 
@@ -66,6 +68,9 @@ def create_spark_session():
         .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
         .config("spark.hadoop.hive.metastore.uris", metastore_uri) \
         .config("spark.sql.parquet.enableVectorizedReader", "false") \
+        .config("spark.driver.memory", "8g") \
+        .config("spark.executor.memory", "8g") \
+        .config("spark.sql.shuffle.partitions", "20") \
         .enableHiveSupport() \
         .master("local[*]") \
         .getOrCreate()
@@ -86,17 +91,15 @@ def load_and_join_data(spark):
     spark.sql("SHOW TABLES").show(truncate=False)
 
     # Load historical weather data from Hive table
-    print("\nLoading historical weather data...")
+    # CHANGED: Read from weather_area_hourly (created by aggregation script) instead of the View
+    print("\nLoading historical weather data from weather_area_hourly...")
     try:
         weather_df = spark.sql("""
                                SELECT
-                                   *,
-                                   CAST(n_stations AS INT) as n_stations_int
-                               FROM weather_area_hourly_historical
+                                   *
+                               FROM weather_area_hourly
                                """)
-        # Drop original n_stations and rename casted version
-        weather_df = weather_df.drop('n_stations').withColumnRenamed('n_stations_int', 'n_stations')
-
+        
         weather_count = weather_df.count()
         print(f"  Weather records: {weather_count:,}")
     except Exception as e:
@@ -142,8 +145,9 @@ def load_and_join_data(spark):
 
     # Show sample
     print("\nSample joined data:")
+    # Adjust columns to match what we actually have
     joined_df.select('dk_area', 'year', 'month', 'day', 'hour',
-                     'temp_mean_area', 'wind_speed_mean_area', 'consumption_mwh_area').show(5)
+                     'temp_dry', 'wind_speed', 'consumption_mwh_area').show(5)
 
     return joined_df
 
