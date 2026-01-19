@@ -14,13 +14,15 @@ spark = SparkSession.builder \
     .appName('CreateWeatherAreaHourlyRawParams') \
     .config('hive.metastore.uris', 'thrift://hive-metastore:9083') \
     .config('spark.sql.warehouse.dir', 'hdfs://namenode:9000/user/hive/warehouse') \
-    .config('spark.driver.memory', '6g') \
+    .config('spark.driver.memory', '8g') \
     .config('spark.driver.maxResultSize', '2g') \
     .config('spark.sql.shuffle.partitions', '20') \
     .config('spark.sql.autoBroadcastJoinThreshold', '-1') \
     .config('hive.exec.dynamic.partition', 'true') \
     .config('hive.exec.dynamic.partition.mode', 'nonstrict') \
+    .config('spark.sql.hive.filesourcePartitionFileCacheSize', '1g') \
     .enableHiveSupport() \
+    .master("local[*]") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")

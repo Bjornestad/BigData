@@ -5,6 +5,7 @@ Joins historical weather data with energy consumption data
 """
 import os
 import datetime
+import traceback
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, year, month, dayofmonth, hour as spark_hour, isnan
 from pyspark.ml import Pipeline
@@ -71,12 +72,59 @@ def create_spark_session():
         .config("spark.driver.memory", "8g") \
         .config("spark.executor.memory", "8g") \
         .config("spark.sql.shuffle.partitions", "20") \
+        .config("spark.sql.hive.filesourcePartitionFileCacheSize", "1g") \
         .enableHiveSupport() \
         .master("local[*]") \
         .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
     return spark
+
+def compact_table(spark, table_name, partition_keys):
+    """
+    Compacts small files for a given partitioned Hive table.
+    This is useful for tables that receive many small streaming updates.
+    It reads the table, repartitions it by its partition keys, and then
+    overwrites the table with fewer, larger files.
+    """
+    print("\n" + "="*70)
+    print(f"COMPACTING TABLE: {table_name}")
+    print("="*70)
+
+    try:
+        # Dynamic partition overwrite is essential for this operation
+        spark.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+        
+        print(f"  Reading table '{table_name}'...")
+        df = spark.table(table_name)
+        
+        original_partitions = df.rdd.getNumPartitions()
+        print(f"  Original number of partitions: {original_partitions}")
+
+        if original_partitions < 50:
+             print("  Table already has a low number of files. Skipping compaction.")
+             return
+
+        # Repartitioning by the partition keys groups all data for a given partition
+        # onto a single worker, which helps Spark write fewer files per partition.
+        print(f"  Repartitioning data by: {partition_keys}...")
+        repartitioned_df = df.repartition(*partition_keys)
+
+        # For insertInto, partition columns must be the LAST columns in the select statement.
+        non_partition_cols = [c for c in df.columns if c not in partition_keys]
+        final_df = repartitioned_df.select(*non_partition_cols, *partition_keys)
+
+        print(f"  Overwriting table '{table_name}' with compacted data...")
+        final_df.write.mode("overwrite").insertInto(table_name)
+
+        print("  ✓ Compaction complete.")
+
+    except Exception as e:
+        print(f"\n  ⚠️  WARNING: Could not compact table '{table_name}'.")
+        print(f"  Error: {e}")
+        traceback.print_exc()
+        print("\n     Proceeding with training using un-compacted data.")
+
 
 def load_and_join_data(spark):
     """
@@ -372,6 +420,9 @@ def main():
     spark = create_spark_session()
 
     try:
+        # Before loading data, compact the historical weather table to optimize reads
+        compact_table(spark, "weather_area_hourly", partition_keys=["dk_area", "year", "month"])
+
         # Load and join data
         df = load_and_join_data(spark)
 

@@ -79,4 +79,11 @@ spec:
             # Set a high value for historical days to populate the system
             - name: FETCH_HISTORICAL_DAYS
               value: "10"
+          resources:
+            requests:
+              memory: "16Gi"
+              cpu: "6"
+            limits:
+              memory: "20Gi"
+              cpu: "12"
 {{- end }}
