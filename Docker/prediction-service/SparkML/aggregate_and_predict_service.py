@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-print("--- SCRIPT VERSION 9 ---")
+print("--- SCRIPT VERSION 10 ---")
 """
 Combined Weather Aggregation and Energy Prediction Service
 1. Aggregates weather_raw_avro (long format) to weather_area_hourly (wide format)
@@ -33,8 +33,12 @@ HDFS_WAREHOUSE = os.getenv("HDFS_WAREHOUSE", "hdfs://namenode:9000/user/hive/war
 EVENT_DRIVEN_MODE = os.getenv("EVENT_DRIVEN_MODE", "true").lower() == "true"
 WEATHER_INPUT_TOPIC = os.getenv("WEATHER_INPUT_TOPIC", "weather_raw_avro")
 ENERGY_INPUT_TOPIC = os.getenv("ENERGY_INPUT_TOPIC", "energy_actual")
+RUN_COMPACTION = os.getenv("RUN_COMPACTION", "false").lower() == "true"
 
 mode_str = "EVENT-DRIVEN (listens to Kafka topics)" if EVENT_DRIVEN_MODE else f"POLLING (every {CHECK_INTERVAL}s)"
+if RUN_COMPACTION:
+    mode_str = "COMPACTION JOB (One-off)"
+
 print(f"""
 {'='*70}
 COMBINED 10-MIN AGGREGATION & PREDICTION SERVICE
@@ -950,9 +954,60 @@ def run_weather_pipeline_with_timer():
     run_weather_pipeline()
     reset_timer()
 
+def compact_weather_data():
+    """
+    One-off compaction job to merge small files into larger ones.
+    Triggered by setting RUN_COMPACTION=true.
+    """
+    print(f"\n{'='*70}")
+    print(f"COMPACTION JOB - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*70}")
+
+    try:
+        # Source and destination
+        source_table = "weather_raw_avro"
+        dest_path = f"{HDFS_WAREHOUSE}/weather_raw_avro_clean"
+        
+        print(f"  Source table: {source_table}")
+        print(f"  Destination:  {dest_path}")
+        
+        # Read data
+        print("  Reading data...")
+        # Using spark.table() to handle the existing Hive table format (Avro) correctly
+        df = spark.table(source_table)
+        
+        # Check if table is empty
+        if df.rdd.isEmpty():
+             print("  No data to compact.")
+             return
+
+        count = df.count()
+        print(f"  Found {count:,} records to compact")
+        
+        # Write compacted data
+        # Using coalesce(5) as requested to reduce file count significantly
+        print("  Writing compacted data (Parquet)...")
+        df.coalesce(5).write.mode("overwrite").parquet(dest_path)
+        
+        print("  ✓ Compaction successful")
+        print(f"  Clean data is available at: {dest_path}")
+        print("  To use this data, you can create a new table:")
+        print(f"  CREATE EXTERNAL TABLE weather_raw_clean STORED AS PARQUET LOCATION '{dest_path}';")
+        
+    except Exception as e:
+        print(f"  ✗ Compaction failed: {e}")
+        import traceback
+        traceback.print_exc()
+
 def main():
     """Main entry point - either event-driven or polling mode"""
     global last_execution_time
+
+    if RUN_COMPACTION:
+        compact_weather_data()
+        # Stop Spark and exit after compaction
+        spark.stop()
+        return
 
     if EVENT_DRIVEN_MODE:
         print(f"\n🚀 Starting in EVENT-DRIVEN mode")
