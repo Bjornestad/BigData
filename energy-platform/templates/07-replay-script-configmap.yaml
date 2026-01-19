@@ -26,8 +26,8 @@ data:
     ENERGY_TOPIC = "energy_actual"
 
     # HDFS Paths
-    HDFS_ENERGY_PATH = "/user/hive/warehouse/energy_actual"
-    HDFS_WEATHER_PATH = "/user/hive/warehouse/weather_observations_historical"
+    HDFS_ENERGY_PATH = "hdfs://namenode:9000/user/hive/warehouse/energy_actual"
+    HDFS_WEATHER_PATH = "hdfs://namenode:9000/user/hive/warehouse/weather_observations_historical"
 
     # Local temp dir
     TEMP_DIR = "/tmp/replay_data"
