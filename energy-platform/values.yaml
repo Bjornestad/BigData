@@ -20,6 +20,9 @@ jobs:
   initializeSystem:
     enabled: false
 
+prediction:
+  trainOnStartup: false
+
 timescaledb:
   user: postgres
   password: "changeme123"

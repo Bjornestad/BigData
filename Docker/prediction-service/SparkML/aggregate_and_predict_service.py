@@ -33,6 +33,7 @@ HDFS_WAREHOUSE = os.getenv("HDFS_WAREHOUSE", "hdfs://namenode:9000/user/hive/war
 EVENT_DRIVEN_MODE = os.getenv("EVENT_DRIVEN_MODE", "true").lower() == "true"
 WEATHER_INPUT_TOPIC = os.getenv("WEATHER_INPUT_TOPIC", "weather_raw_avro")
 ENERGY_INPUT_TOPIC = os.getenv("ENERGY_INPUT_TOPIC", "energy_actual")
+TRAIN_ON_STARTUP = os.getenv("TRAIN_ON_STARTUP", "false").lower() == "true"
 
 mode_str = "EVENT-DRIVEN (listens to Kafka topics)" if EVENT_DRIVEN_MODE else f"POLLING (every {CHECK_INTERVAL}s)"
 print(f"""
@@ -111,11 +112,68 @@ def station_to_dk_area(station_id):
 station_to_dk_area_udf = udf(station_to_dk_area, StringType())
 
 # Load consumption model - automatically find latest if path is a directory
+# If no model exists, run training first
 print("Loading consumption model...")
+
+def run_training_pipeline():
+    """Run the training pipeline to create a model"""
+    import subprocess
+
+    print("\n" + "="*70)
+    print("NO MODEL FOUND - RUNNING TRAINING PIPELINE")
+    print("="*70)
+
+    # Step 1: Create weather area hourly aggregates
+    print("\n[1/2] Creating weather area hourly aggregates...")
+    try:
+        result = subprocess.run(
+            ["python3", "/app/SparkML/create_weather_area_hourly_raw_params.py"],
+            capture_output=True,
+            text=True,
+            timeout=1800  # 30 min timeout
+        )
+        if result.returncode != 0:
+            print(f"  ⚠️  Aggregation had issues: {result.stderr[-500:] if result.stderr else 'No error output'}")
+        else:
+            # Show last 10 lines of output
+            for line in result.stdout.strip().split('\n')[-10:]:
+                print(f"    {line}")
+            print("  ✓ Weather aggregation complete")
+    except subprocess.TimeoutExpired:
+        print("  ⚠️  Weather aggregation timed out, continuing anyway...")
+    except Exception as e:
+        print(f"  ⚠️  Weather aggregation error: {e}")
+
+    # Step 2: Train the model
+    print("\n[2/2] Training consumption model...")
+    try:
+        result = subprocess.run(
+            ["python3", "/app/SparkML/train_consumption_model.py"],
+            capture_output=True,
+            text=True,
+            timeout=3600  # 60 min timeout
+        )
+        if result.returncode != 0:
+            print(f"  ✗ Training failed: {result.stderr[-1000:] if result.stderr else 'No error output'}")
+            return False
+        else:
+            # Show last 20 lines of output
+            for line in result.stdout.strip().split('\n')[-20:]:
+                print(f"    {line}")
+            print("  ✓ Model training complete")
+            return True
+    except subprocess.TimeoutExpired:
+        print("  ✗ Model training timed out after 60 minutes")
+        return False
+    except Exception as e:
+        print(f"  ✗ Model training error: {e}")
+        return False
+
 try:
     from py4j.protocol import Py4JJavaError
 
     # If CONSUMPTION_MODEL_PATH is a directory, find the latest model using Spark
+    model_found = False
     if not CONSUMPTION_MODEL_PATH.endswith("energy_model_consumption"):
         try:
             # Use Spark's Hadoop FileSystem API to list directory
@@ -143,15 +201,45 @@ try:
                     latest_model = sorted(model_dirs)[-1]
                     print(f"  Found {len(model_dirs)} models, using latest: {latest_model.split('/')[-1]}")
                     CONSUMPTION_MODEL_PATH = latest_model
+                    model_found = True
                 else:
                     print(f"  No models found in {CONSUMPTION_MODEL_PATH}")
-                    sys.exit(1)
             else:
                 print(f"  Model directory not found: {CONSUMPTION_MODEL_PATH}")
-                sys.exit(1)
+                # Create the directory
+                fs.mkdirs(path)
+                print(f"  Created model directory: {CONSUMPTION_MODEL_PATH}")
         except Exception as dir_error:
-            print(f"  Could not list directory (assuming direct model path): {dir_error}")
-            # Assume it's a direct model path and try to load it
+            print(f"  Could not list directory: {dir_error}")
+
+    # If no model found, check if we should train
+    if not model_found:
+        if TRAIN_ON_STARTUP:
+            print(f"  TRAIN_ON_STARTUP=true, running training pipeline...")
+            if run_training_pipeline():
+                # Re-check for model after training
+                file_statuses = fs.listStatus(path)
+                model_dirs = []
+                for status in file_statuses:
+                    file_path = status.getPath().toString()
+                    if 'energy_model_consumption' in file_path:
+                        model_dirs.append(file_path)
+
+                if model_dirs:
+                    latest_model = sorted(model_dirs)[-1]
+                    print(f"  Found newly trained model: {latest_model.split('/')[-1]}")
+                    CONSUMPTION_MODEL_PATH = latest_model
+                    model_found = True
+                else:
+                    print("  ✗ Training completed but model not found in HDFS")
+                    sys.exit(1)
+            else:
+                print("  ✗ Training failed, cannot continue")
+                sys.exit(1)
+        else:
+            print("  ✗ No model found and TRAIN_ON_STARTUP=false")
+            print("  Set TRAIN_ON_STARTUP=true or deploy with --set prediction.trainOnStartup=true to train")
+            sys.exit(1)
 
     consumption_model = PipelineModel.load(CONSUMPTION_MODEL_PATH)
     print(f"✓ Consumption model loaded from: {CONSUMPTION_MODEL_PATH.split('/')[-1]}\n")
