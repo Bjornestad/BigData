@@ -1,171 +1,326 @@
 const { Kafka } = require('kafkajs');
 const { SchemaRegistry, SchemaType } = require('@kafkajs/confluent-schema-registry');
+const WebSocket = require('ws');
+const express = require('express');
+const http = require('http');
+const cors = require('cors');
 const { Pool } = require('pg');
+const { URL } = require('url');
 
 // Configuration from environment variables
 const KAFKA_BROKERS = (process.env.KAFKA_BROKERS || 'localhost:9092').split(',');
 const SCHEMA_REGISTRY_URL = process.env.SCHEMA_REGISTRY_URL || 'http://schema-registry:8081';
 const ACTUAL_TOPIC = process.env.ACTUAL_TOPIC || 'energy_actual';
 const PREDICTED_TOPIC = process.env.PREDICTED_TOPIC || 'energy_predictions';
-const CONSUMER_GROUP = process.env.CONSUMER_GROUP || 'database-writer';
-const DATABASE_URL = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:5432/power_grid';
-const BATCH_SIZE = parseInt(process.env.BATCH_SIZE || '1000');
-const FLUSH_INTERVAL = parseInt(process.env.FLUSH_INTERVAL || '10000'); // 10 seconds
+const PORT = process.env.PORT || 8080;
+const CONSUMER_GROUP = process.env.CONSUMER_GROUP || 'power-grid-monitor';
+const DATABASE_URL = process.env.DATABASE_URL;
 
-console.log('Starting Database Writer Service');
-console.log('Configuration:');
-console.log('- Kafka Brokers:', KAFKA_BROKERS);
-console.log('- Schema Registry:', SCHEMA_REGISTRY_URL);
-console.log('- Topics:', [ACTUAL_TOPIC, PREDICTED_TOPIC]);
-console.log('- Consumer Group:', CONSUMER_GROUP);
-console.log('- Batch Size:', BATCH_SIZE);
-console.log('- Flush Interval:', FLUSH_INTERVAL, 'ms');
-
-// Initialize PostgreSQL connection pool
-const pool = new Pool({
-  connectionString: DATABASE_URL,
-  max: 20,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 10000,
-});
-
-// Test database connection
-pool.on('connect', () => {
-  console.log('Database pool connected');
-});
-
-pool.on('error', (err) => {
-  console.error('Unexpected error on idle database client', err);
-  process.exit(-1);
-});
+// In-memory data store (last 100 data points)
+const MAX_DATA_POINTS = 100;
+let actualData = [];
+let predictedData = [];
 
 // Initialize Kafka
 const kafka = new Kafka({
-  clientId: 'database-writer',
+  clientId: 'power-grid-backend',
   brokers: KAFKA_BROKERS,
   retry: {
-    initialRetryTime: 100,
-    retries: 8
+    initialRetryTime: 300,
+    retries: 15
   }
 });
 
 // Initialize Schema Registry
 const registry = new SchemaRegistry({ host: SCHEMA_REGISTRY_URL });
 
-const consumer = kafka.consumer({ 
-  groupId: CONSUMER_GROUP,
-  sessionTimeout: 30000,
-  heartbeatInterval: 3000
-});
+const consumer = kafka.consumer({ groupId: CONSUMER_GROUP });
 
-// In-memory batch storage
-let batch = [];
-let lastFlushTime = Date.now();
-let totalWritten = 0;
-let totalErrors = 0;
-
-// Statistics
-let stats = {
-  messagesReceived: 0,
-  messagesWritten: 0,
-  batchesWritten: 0,
-  errors: 0,
-  lastFlush: new Date().toISOString()
-};
-
-// Flush batch to database
-async function flushBatch() {
-  if (batch.length === 0) return;
-  
-  // Aggregate batch: SUM values for each (time, type) pair
-  // This handles the case where multiple records exist for the same timestamp (e.g. different areas)
-  const aggregatedEntries = new Map();
-  batch.forEach(item => {
-    const key = `${item.time}_${item.type}`;
-    if (aggregatedEntries.has(key)) {
-        const existing = aggregatedEntries.get(key);
-        existing.value += item.value;
-    } else {
-        // Clone item to avoid modifying original batch if we needed it
-        aggregatedEntries.set(key, { ...item });
-    }
-  });
-
-  const batchToFlush = Array.from(aggregatedEntries.values());
-  batch = []; // Clear the original batch
-  
-  const startTime = Date.now();
-  
+// Initialize PostgreSQL pool (if DATABASE_URL is provided)
+let pool = null;
+if (DATABASE_URL) {
   try {
-    // Build parameterized INSERT query
-    const values = batchToFlush.map((_, i) => 
-      `($${i*3+1}, $${i*3+2}, $${i*3+3})`
-    ).join(',');
-    
-    const params = batchToFlush.flatMap(item => [
-      item.time,
-      item.value,
-      item.type
-    ]);
-    
-    // Use ON CONFLICT DO UPDATE SET value = measurements.value + EXCLUDED.value
-    // This allows summing up values from different batches (e.g. DK1 in batch 1, DK2 in batch 2)
-    // Note: This assumes we start with a clean DB or handle duplicates upstream.
-    const query = `
-      INSERT INTO measurements (time, value, type) 
-      VALUES ${values}
-      ON CONFLICT (time, type) DO UPDATE 
-      SET value = measurements.value + EXCLUDED.value
-    `;
-    
-    await pool.query(query, params);
-    
-    const duration = Date.now() - startTime;
-    totalWritten += batchToFlush.length;
-    stats.messagesWritten += batchToFlush.length;
-    stats.batchesWritten += 1;
-    stats.lastFlush = new Date().toISOString();
-    lastFlushTime = Date.now();
-    
-    console.log(`✓ Flushed ${batchToFlush.length} aggregated records in ${duration}ms (total: ${totalWritten})`);
-  } catch (error) {
-    console.error('✗ Database write error:', error.message);
-    totalErrors++;
-    stats.errors += 1;
-    
-    // Re-add to batch for retry (optional - implement dead letter queue for production)
-    // Note: We re-add the deduplicated batch to avoid infinite loops with duplicates
-    batch = [...batchToFlush, ...batch];
-    
-    // If batch is too large after error, drop oldest records
-    if (batch.length > BATCH_SIZE * 3) {
-      const dropped = batch.length - BATCH_SIZE;
-      batch = batch.slice(-BATCH_SIZE);
-      console.warn(`⚠ Dropped ${dropped} old records due to repeated errors`);
+    // Log masked URL for debugging
+    try {
+      const maskedUrl = DATABASE_URL.replace(/:([^:@]+)@/, ':****@');
+      console.log(`Initializing database connection with: ${maskedUrl}`);
+    } catch (e) {
+      console.log('Initializing database connection (could not mask URL)');
     }
+
+    console.log('Initializing database connection...');
+    // Manually parse the URL to avoid issues with pg-connection-string
+    const dbUrl = new URL(DATABASE_URL);
+
+    const config = {
+      user: dbUrl.username,
+      password: decodeURIComponent(dbUrl.password),
+      host: dbUrl.hostname,
+      port: parseInt(dbUrl.port) || 5432,
+      database: dbUrl.pathname.slice(1),
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
+    };
+
+    console.log('DB Config (password masked):', { ...config, password: '****' });
+
+    pool = new Pool(config);
+
+    pool.on('error', (err) => {
+      console.error('Unexpected error on idle database client', err);
+    });
+
+    console.log('Database connection pool initialized');
+
+    // Test connection
+    pool.query('SELECT NOW()', (err, res) => {
+      if (err) {
+        console.error('Database connection test failed:', err);
+      } else {
+        console.log('Database connection test successful');
+      }
+    });
+  } catch (error) {
+    console.error('Error initializing database pool:', error);
+    console.error('Invalid DATABASE_URL format or connection error. Historical data will be unavailable.');
+    // Do NOT fallback to connectionString if manual parsing failed, as it likely means the URL is malformed
+    pool = null;
   }
+} else {
+  console.warn('DATABASE_URL not set - historical queries disabled');
 }
 
-// Periodic flush
-const flushTimer = setInterval(async () => {
-  const timeSinceLastFlush = Date.now() - lastFlushTime;
-  
-  if (batch.length > 0 && timeSinceLastFlush >= FLUSH_INTERVAL) {
-    await flushBatch();
+// Express app for health checks and API
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const server = http.createServer(app);
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    actualDataPoints: actualData.length,
+    predictedDataPoints: predictedData.length,
+    databaseEnabled: !!pool
+  });
+});
+
+// Current data endpoint (in-memory buffer)
+app.get('/data', (req, res) => {
+  res.json({
+    actual: actualData,
+    predicted: predictedData
+  });
+});
+
+// Historical data endpoint (from database)
+app.post('/api/historical', async (req, res) => {
+  if (!pool) {
+    return res.status(503).json({
+      error: 'Database not configured',
+      message: 'Historical queries require DATABASE_URL to be set'
+    });
   }
-}, 1000); // Check every second
+
+  try {
+    const { start, end, type, interval } = req.body;
+
+    if (!start || !end) {
+      return res.status(400).json({
+        error: 'Missing required parameters',
+        message: 'start and end timestamps are required'
+      });
+    }
+
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+
+    // Validate dates
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+      return res.status(400).json({
+        error: 'Invalid date format',
+        message: 'start and end must be valid ISO 8601 timestamps'
+      });
+    }
+
+    // Auto-select interval based on time range if not provided
+    let selectedInterval = interval;
+    if (!selectedInterval) {
+      const duration = endDate - startDate;
+      const hours = duration / (1000 * 60 * 60);
+
+      if (hours <= 1) {
+        selectedInterval = '1 minute';
+      } else if (hours <= 24) {
+        selectedInterval = '5 minutes';
+      } else if (hours <= 168) { // 1 week
+        selectedInterval = '1 hour';
+      } else {
+        selectedInterval = '1 day';
+      }
+    }
+
+    // Decide which table/view to use based on interval
+    let tableName;
+    if (selectedInterval.includes('minute')) {
+      tableName = 'measurements'; // Raw data
+    } else if (selectedInterval.includes('hour') || selectedInterval.includes('day')) {
+      // Check if we can use pre-aggregated views
+      if (selectedInterval === '5 minutes') {
+        tableName = 'measurements_5min';
+      } else if (selectedInterval === '1 hour') {
+        tableName = 'measurements_1hour';
+      } else if (selectedInterval === '1 day') {
+        tableName = 'measurements_1day';
+      } else {
+        tableName = 'measurements'; // Fallback to raw
+      }
+    } else {
+      tableName = 'measurements';
+    }
+
+    // Build query
+    let query, params;
+
+    if (tableName.includes('measurements_')) {
+      // Query pre-aggregated view
+      query = `
+        SELECT
+          bucket as timestamp,
+          type,
+          avg_value as value,
+          min_value as min,
+          max_value as max,
+          count
+        FROM ${tableName}
+        WHERE bucket >= $1 AND bucket < $2
+          AND ($3::varchar IS NULL OR type = $3)
+        ORDER BY bucket ASC
+      `;
+      params = [startDate, endDate, type || null];
+    } else {
+      // Query raw data with aggregation
+      query = `
+        SELECT
+          time_bucket($1, time) AS timestamp,
+          type,
+          AVG(value) as value,
+          MIN(value) as min,
+          MAX(value) as max,
+          COUNT(*) as count
+        FROM measurements
+        WHERE time >= $2 AND time < $3
+          AND ($4::varchar IS NULL OR type = $4)
+        GROUP BY timestamp, type
+        ORDER BY timestamp ASC
+      `;
+      params = [selectedInterval, startDate, endDate, type || null];
+    }
+
+    console.log(`[DEBUG] Querying historical data: ${selectedInterval}, Table: ${tableName}, Range: ${startDate.toISOString()} - ${endDate.toISOString()}`);
+
+    const result = await pool.query(query, params);
+
+    console.log(`[DEBUG] Query returned ${result.rows.length} rows. First row:`, result.rows[0]);
+
+    res.json({
+      data: result.rows,
+      metadata: {
+        interval: selectedInterval,
+        source: tableName,
+        pointsReturned: result.rows.length,
+        timeRange: {
+          start: startDate.toISOString(),
+          end: endDate.toISOString()
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error querying historical data:', error);
+    res.status(500).json({
+      error: 'Database query failed',
+      message: error.message
+    });
+  }
+});
+
+// Stats endpoint (from database)
+app.post('/api/stats', async (req, res) => {
+  if (!pool) {
+    return res.status(503).json({
+      error: 'Database not configured'
+    });
+  }
+
+  try {
+    const { start, end, type } = req.body;
+
+    const startDate = new Date(start || Date.now() - 24*60*60*1000);
+    const endDate = new Date(end || Date.now());
+
+    const result = await pool.query(`
+      SELECT
+        type,
+        AVG(value) as avg,
+        MIN(value) as min,
+        MAX(value) as max,
+        STDDEV(value) as stddev,
+        COUNT(*) as count
+      FROM measurements
+      WHERE time >= $1 AND time < $2
+        AND ($3::varchar IS NULL OR type = $3)
+      GROUP BY type
+    `, [startDate, endDate, type || null]);
+
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error querying stats:', error);
+    res.status(500).json({ error: 'Database query failed' });
+  }
+});
+
+// WebSocket server
+const wss = new WebSocket.Server({ server });
+
+// Broadcast to all connected clients
+function broadcast(data) {
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify(data));
+    }
+  });
+}
+
+wss.on('connection', (ws) => {
+  console.log('Client connected (total:', wss.clients.size, ')');
+
+  // Send existing data to new client
+  ws.send(JSON.stringify({
+    type: 'initial',
+    actual: actualData,
+    predicted: predictedData
+  }));
+
+  ws.on('close', () => {
+    console.log('Client disconnected (remaining:', wss.clients.size - 1, ')');
+  });
+
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
+  });
+});
 
 // Kafka consumer setup
 async function setupKafka() {
   try {
     await consumer.connect();
-    console.log('✓ Connected to Kafka');
+    console.log('Connected to Kafka');
 
-    await consumer.subscribe({ 
-      topics: [ACTUAL_TOPIC, PREDICTED_TOPIC],
-      fromBeginning: false 
-    });
-    console.log(`✓ Subscribed to topics: ${ACTUAL_TOPIC}, ${PREDICTED_TOPIC}`);
+    await consumer.subscribe({ topics: [ACTUAL_TOPIC, PREDICTED_TOPIC], fromBeginning: false });
+    console.log(`Subscribed to topics: ${ACTUAL_TOPIC}, ${PREDICTED_TOPIC}`);
 
     await consumer.run({
       eachMessage: async ({ topic, partition, message }) => {
@@ -176,135 +331,139 @@ async function setupKafka() {
           try {
             value = await registry.decode(message.value);
           } catch (e) {
-            // Fallback to JSON if not Avro (e.g. legacy messages or replay script)
+            // Fallback to JSON if not Avro
             value = JSON.parse(message.value.toString());
           }
 
-          // DEBUG: Log the decoded message to see structure
-          // Log first 5 messages of each batch or random sample
-          if (Math.random() < 0.001 || stats.messagesReceived < 5) {
-             console.log(`[DEBUG] Topic: ${topic}, Decoded keys:`, Object.keys(value));
-             if (topic === ACTUAL_TOPIC) {
-                 console.log(`[DEBUG] ShareMWh: ${value.ShareMWh}, Type: ${typeof value.ShareMWh}`);
-             }
-          }
-
-          let type = '';
           if (topic === ACTUAL_TOPIC) {
-            type = 'actual';
+            const timestamp = value.timestamp || value.HourUTC || value.HourDK || new Date().toISOString();
+
+            // --- FILTER LOGIC START ---
+            // Only process data if it is recent (e.g., within the last 24 hours)
+            // This prevents historical replay data from showing up as "Live"
+            const msgTime = new Date(timestamp).getTime();
+            const cutoffTime = Date.now() - (24 * 60 * 60 * 1000); // 24 hours ago
+
+            if (msgTime < cutoffTime) {
+              // Silently ignore historical data for the live dashboard
+              // (The Database Writer service will still pick this up for the historical tabs)
+              return;
+            }
+            // --- FILTER LOGIC END ---
+
+            const incomingValue = parseFloat(value.total_consumption_mwh || value.value || value.ShareMWh || 0);
+            const incomingProduction = parseFloat(value.total_production_mwh || 0);
+
+            // Check if we already have a data point for this timestamp
+            const existingPoint = actualData.find(d => d.timestamp === timestamp);
+
+            let dataPoint;
+
+            if (existingPoint) {
+              // Aggregate values (Summing up DK1 + DK2 etc.)
+              existingPoint.value += incomingValue;
+              existingPoint.production += incomingProduction;
+              dataPoint = existingPoint;
+            } else {
+              // Create new data point
+              dataPoint = {
+                timestamp: timestamp,
+                value: incomingValue,
+                production: incomingProduction,
+                dk_area: value.dk_area || value.PriceArea,
+                type: 'actual'
+              };
+
+              actualData.push(dataPoint);
+              if (actualData.length > MAX_DATA_POINTS) {
+                actualData.shift();
+              }
+            }
+
+            // Broadcast the aggregated state
+            broadcast({
+              type: 'actual',
+              data: dataPoint
+            });
+
+            console.log(`Actual [${timestamp}]: ${dataPoint.value.toFixed(2)} MW`);
+
           } else if (topic === PREDICTED_TOPIC) {
-            type = 'predicted';
-          }
+            const timestamp = value.timestamp || value.HourUTC || value.HourDK || new Date().toISOString();
 
-          // Extract value based on message structure
-          let numericValue = 0;
-          if (value.value !== undefined) {
-            numericValue = parseFloat(value.value);
-          } else if (value.total_consumption_mwh !== undefined) {
-            numericValue = parseFloat(value.total_consumption_mwh);
-          } else if (value.total_production_mwh !== undefined) {
-            numericValue = parseFloat(value.total_production_mwh);
-          } else if (value.predictions && value.predictions.consumption_mwh !== undefined) {
-             numericValue = parseFloat(value.predictions.consumption_mwh);
-          } else if (value.ShareMWh !== undefined) {
-             // Handle Realtime Energy Fetcher format
-             numericValue = parseFloat(value.ShareMWh);
-          }
+            // Apply same filter for predictions
+            const msgTime = new Date(timestamp).getTime();
+            const cutoffTime = Date.now() - (24 * 60 * 60 * 1000);
 
-          // Extract timestamp
-          let timestamp = value.timestamp;
-          if (!timestamp) {
-             if (value.HourUTC) timestamp = value.HourUTC;
-             else if (value.observed) timestamp = value.observed;
-             else timestamp = new Date().toISOString();
-          }
+            if (msgTime < cutoffTime) {
+              return;
+            }
 
-          // Add to batch
-          batch.push({
-            time: timestamp,
-            value: numericValue,
-            type: type
-          });
-          
-          stats.messagesReceived += 1;
-          
-          // Flush if batch size reached
-          if (batch.length >= BATCH_SIZE) {
-            await flushBatch();
+            const incomingValue = parseFloat(value.predictions?.consumption_mwh || value.value || 0);
+            const incomingProduction = parseFloat(value.predictions?.production_mwh || 0);
+            const incomingNet = parseFloat(value.predictions?.net_balance_mwh || 0);
+
+            // Check if we already have a data point for this timestamp
+            const existingPoint = predictedData.find(d => d.timestamp === timestamp);
+
+            let dataPoint;
+
+            if (existingPoint) {
+              // Aggregate values
+              existingPoint.value += incomingValue;
+              existingPoint.production += incomingProduction;
+              existingPoint.net_balance += incomingNet;
+              dataPoint = existingPoint;
+            } else {
+              dataPoint = {
+                timestamp: timestamp,
+                value: incomingValue,
+                production: incomingProduction,
+                net_balance: incomingNet,
+                dk_area: value.dk_area,
+                type: 'predicted'
+              };
+
+              predictedData.push(dataPoint);
+              if (predictedData.length > MAX_DATA_POINTS) {
+                predictedData.shift();
+              }
+            }
+
+            broadcast({
+              type: 'predicted',
+              data: dataPoint
+            });
+
+            console.log(`Predicted [${timestamp}]: ${dataPoint.value.toFixed(2)} MW`);
           }
         } catch (error) {
-          console.error('✗ Error processing message:', error.message);
-          stats.errors += 1;
+          console.error('Error processing message:', error);
         }
       },
     });
-    
-    console.log('✓ Database writer service running');
   } catch (error) {
-    console.error('✗ Error setting up Kafka:', error);
-    console.log('Retrying in 5 seconds...');
+    console.error('Error setting up Kafka:', error);
     setTimeout(setupKafka, 5000);
   }
 }
 
-// Health check and stats endpoint (simple HTTP server)
-const http = require('http');
-const healthServer = http.createServer((req, res) => {
-  if (req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: 'healthy',
-      batch: {
-        current: batch.length,
-        maxSize: BATCH_SIZE
-      },
-      stats: stats,
-      uptime: process.uptime()
-    }));
-  } else if (req.url === '/metrics') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`
-# Database Writer Metrics
-messages_received_total ${stats.messagesReceived}
-messages_written_total ${stats.messagesWritten}
-batches_written_total ${stats.batchesWritten}
-errors_total ${stats.errors}
-batch_current_size ${batch.length}
-    `.trim());
-  } else {
-    res.writeHead(404);
-    res.end('Not Found');
-  }
-});
-
-const HEALTH_PORT = process.env.HEALTH_PORT || 8081;
-healthServer.listen(HEALTH_PORT, () => {
-  console.log(`Health check server running on port ${HEALTH_PORT}`);
-  console.log(`- http://localhost:${HEALTH_PORT}/health`);
-  console.log(`- http://localhost:${HEALTH_PORT}/metrics`);
+// Start server
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`WebSocket endpoint: ws://localhost:${PORT}`);
+  console.log(`HTTP API: http://localhost:${PORT}`);
+  console.log('');
+  setupKafka();
 });
 
 // Graceful shutdown
-async function gracefulShutdown() {
-  console.log('Shutting down gracefully...');
-  
-  clearInterval(flushTimer);
-  
-  // Flush remaining batch
-  if (batch.length > 0) {
-    console.log(`Flushing ${batch.length} remaining records...`);
-    await flushBatch();
-  }
-  
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM signal received: closing HTTP server and Kafka consumer');
   await consumer.disconnect();
-  await pool.end();
-  
-  console.log('✓ Shutdown complete');
-  process.exit(0);
-}
-
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', gracefulShutdown);
-
-// Start the service
-setupKafka();
+  if (pool) await pool.end();
+  server.close(() => {
+    console.log('HTTP server closed');
+    process.exit(0);
+  });
+});

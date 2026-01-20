@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-print("--- SCRIPT VERSION 9 ---")
+print("--- SCRIPT VERSION 11 ---")
 """
 Combined Weather Aggregation and Energy Prediction Service
 1. Aggregates weather_raw_avro (long format) to weather_area_hourly (wide format)
@@ -34,8 +34,12 @@ EVENT_DRIVEN_MODE = os.getenv("EVENT_DRIVEN_MODE", "true").lower() == "true"
 WEATHER_INPUT_TOPIC = os.getenv("WEATHER_INPUT_TOPIC", "weather_raw_avro")
 ENERGY_INPUT_TOPIC = os.getenv("ENERGY_INPUT_TOPIC", "energy_actual")
 TRAIN_ON_STARTUP = os.getenv("TRAIN_ON_STARTUP", "false").lower() == "true"
+RUN_COMPACTION = os.getenv("RUN_COMPACTION", "false").lower() == "true"
 
 mode_str = "EVENT-DRIVEN (listens to Kafka topics)" if EVENT_DRIVEN_MODE else f"POLLING (every {CHECK_INTERVAL}s)"
+if RUN_COMPACTION:
+    mode_str = "COMPACTION JOB (One-off)"
+
 print(f"""
 {'='*70}
 COMBINED 10-MIN AGGREGATION & PREDICTION SERVICE
@@ -52,17 +56,10 @@ Fallback Interval: {CHECK_INTERVAL}s ({CHECK_INTERVAL/60:.0f} min)
 
 # Initialize Spark with Hive support
 print("Initializing Spark session...")
-spark = SparkSession.builder \
+spark_builder = SparkSession.builder \
     .appName("AggregateAndPredict") \
     .config("spark.hadoop.hive.metastore.uris", "thrift://hive-metastore:9083") \
     .config("spark.sql.warehouse.dir", "hdfs://namenode:9000/user/hive/warehouse") \
-    .config("spark.driver.memory", "4g") \
-    .config("spark.driver.maxResultSize", "2g") \
-    .config("spark.sql.shuffle.partitions", "4") \
-    .config("spark.default.parallelism", "4") \
-    .config("spark.executor.cores", "1") \
-    .config("spark.sql.adaptive.enabled", "true") \
-    .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
     .config("spark.hadoop.hive.exec.dynamic.partition", "true") \
     .config("spark.hadoop.hive.exec.dynamic.partition.mode", "nonstrict") \
     .config("spark.sql.files.ignoreCorruptFiles", "true") \
@@ -70,8 +67,25 @@ spark = SparkSession.builder \
     .config("spark.hadoop.ipc.client.connect.max.retries", "50") \
     .config("spark.hadoop.ipc.client.connect.retry.interval", "2000") \
     .config("spark.hadoop.dfs.client.socket-timeout", "120000") \
-    .enableHiveSupport() \
-    .getOrCreate()
+    .enableHiveSupport()
+
+# Dynamic config from environment variables
+spark_driver_memory = os.getenv("SPARK_DRIVER_MEMORY", "4g")
+spark_driver_max_result_size = os.getenv("SPARK_DRIVER_MAX_RESULT_SIZE", "2g")
+spark_shuffle_partitions = os.getenv("SPARK_SHUFFLE_PARTITIONS", "4")
+spark_default_parallelism = os.getenv("SPARK_DEFAULT_PARALLELISM", "4")
+spark_executor_cores = os.getenv("SPARK_EXECUTOR_CORES", "1")
+spark_sql_adaptive_enabled = os.getenv("SPARK_SQL_ADAPTIVE_ENABLED", "true")
+
+spark_builder.config("spark.driver.memory", spark_driver_memory)
+spark_builder.config("spark.driver.maxResultSize", spark_driver_max_result_size)
+spark_builder.config("spark.sql.shuffle.partitions", spark_shuffle_partitions)
+spark_builder.config("spark.default.parallelism", spark_default_parallelism)
+spark_builder.config("spark.executor.cores", spark_executor_cores)
+spark_builder.config("spark.sql.adaptive.enabled", spark_sql_adaptive_enabled)
+spark_builder.config("spark.sql.adaptive.coalescePartitions.enabled", os.getenv("SPARK_SQL_ADAPTIVE_COALESCE_PARTITIONS_ENABLED", "true"))
+
+spark = spark_builder.getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
 print("✓ Spark session initialized\n")
@@ -1038,9 +1052,84 @@ def run_weather_pipeline_with_timer():
     run_weather_pipeline()
     reset_timer()
 
+def compact_weather_data():
+    """
+    One-off compaction job to merge small files into larger ones.
+    Triggered by setting RUN_COMPACTION=true.
+    """
+    print(f"\n{'='*70}")
+    print(f"COMPACTION JOB - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*70}")
+
+    try:
+        source_table = "weather_raw_avro"
+        print(f"  Source table: {source_table}")
+
+        # Check if compaction is needed by counting the number of data files.
+        try:
+            rows = spark.sql(f"DESCRIBE FORMATTED {source_table}").collect()
+            table_path_str = None
+            for row in rows:
+                if row['col_name'] and row['col_name'].strip() == 'Location':
+                    table_path_str = row['data_type'].strip()
+                    break
+            if not table_path_str:
+                table_path_str = f"{HDFS_WAREHOUSE}/{source_table}"
+
+            hadoop_conf = spark.sparkContext._jsc.hadoopConfiguration()
+            fs = spark.sparkContext._jvm.org.apache.hadoop.fs.FileSystem.get(spark.sparkContext._jvm.java.net.URI(table_path_str), hadoop_conf)
+            path = spark.sparkContext._jvm.org.apache.hadoop.fs.Path(table_path_str)
+
+            if fs.exists(path):
+                file_statuses = fs.listStatus(path)
+                data_file_count = 0
+                for status in file_statuses:
+                    # Count files that are not metadata or directories
+                    if status.isFile() and not status.getPath().getName().startswith(('_', '.')):
+                        data_file_count += 1
+
+                # If there are 10 or fewer files, consider it already compacted.
+                # The coalesce(5) aims for 5 files, so this is a safe upper bound.
+                if data_file_count > 0 and data_file_count <= 10:
+                    print(f"  Skipping compaction: Found only {data_file_count} data files in {table_path_str}. Table appears to be already compacted.")
+                    return
+        except Exception as e:
+            print(f"  Could not check file count, proceeding with compaction. Error: {e}")
+
+        # Read data
+        print("  Reading data...")
+        # Using spark.table() to handle the existing Hive table format (Avro) correctly
+        df = spark.table(source_table)
+
+        # Check if table is empty
+        if df.rdd.isEmpty():
+             print("  No data to compact.")
+             return
+
+        count = df.count()
+        print(f"  Found {count:,} records to compact")
+
+        # Write compacted data back to the original table, overwriting it.
+        # This will also change the table's stored format to Parquet.
+        print("  Writing compacted data (Parquet)...")
+        df.coalesce(5).write.mode("overwrite").format("parquet").saveAsTable(source_table)
+
+        print(f"  ✓ Compaction successful. Table '{source_table}' has been overwritten with compacted Parquet data.")
+
+    except Exception as e:
+        print(f"  ✗ Compaction failed: {e}")
+        import traceback
+        traceback.print_exc()
+
 def main():
     """Main entry point - either event-driven or polling mode"""
     global last_execution_time
+
+    if RUN_COMPACTION:
+        compact_weather_data()
+        # Stop Spark and exit after compaction
+        spark.stop()
+        return
 
     if EVENT_DRIVEN_MODE:
         print(f"\n🚀 Starting in EVENT-DRIVEN mode")

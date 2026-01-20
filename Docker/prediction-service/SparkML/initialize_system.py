@@ -37,14 +37,16 @@ def create_spark_session():
         .appName("SystemInitialization") \
         .config("spark.hadoop.hive.metastore.uris", HIVE_METASTORE) \
         .config("spark.sql.warehouse.dir", HDFS_WAREHOUSE) \
-        .config("spark.driver.memory", "4g") \
-        .config("spark.executor.memory", "4g") \
+        .config("spark.driver.memory", "8g") \
+        .config("spark.executor.memory", "8g") \
         .config("spark.hadoop.hive.exec.dynamic.partition", "true") \
         .config("spark.hadoop.hive.exec.dynamic.partition.mode", "nonstrict") \
         .config("spark.sql.parquet.enableVectorizedReader", "false") \
         .config("spark.sql.files.ignoreCorruptFiles", "true") \
         .config("spark.sql.files.ignoreMissingFiles", "true") \
+        .config("spark.sql.hive.filesourcePartitionFileCacheSize", "1g") \
         .enableHiveSupport() \
+        .master("local[*]") \
         .getOrCreate()
 
     spark.sparkContext.setLogLevel("WARN")
@@ -106,6 +108,20 @@ def create_hourly_weather_aggregates(spark):
     try:
         # Clean metadata files that might confuse Avro reader
         clean_spark_metadata(spark, "weather_raw_avro")
+        clean_spark_metadata(spark, "weather_raw_historical")
+
+        # Compact weather_raw_historical to fix small file problem before aggregation
+        print("  Compacting weather_raw_historical...")
+        try:
+            subprocess.run(
+                ["python3", "/app/SparkML/compact_files.py", "weather_raw_historical"],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            print("    ✓ Compaction successful")
+        except subprocess.CalledProcessError as e:
+            print(f"    ⚠️  Compaction failed (non-fatal): {e.stderr}")
 
         # Repair table to ensure partitions are discovered
         print("  Repairing table partitions for weather_raw_avro...")

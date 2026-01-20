@@ -33,13 +33,20 @@ spec:
               done
               echo "Kafka is ready!"
 
+              echo "Waiting for Schema Registry..."
+              until python3 -c "import socket; s=socket.socket(); s.settimeout(5); s.connect(('schema-registry', 8081))" 2>/dev/null; do
+                echo "Waiting for Schema Registry..."
+                sleep 5
+              done
+              echo "Schema Registry is ready!"
+
               echo "Starting replay from HDFS..."
-              python /app/scripts/replay_to_kafka.py
+              python3 /app/scripts/replay_to_kafka.py
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "{{ .Release.Name }}-energy-cluster:9092"
-            - name: DATA_DIR
-              value: "/data/historical_energy_batches" # Point to where fetcher saves data
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://schema-registry:8081"
           volumeMounts:
             - name: replay-script
               mountPath: /app/scripts/replay_to_kafka.py
